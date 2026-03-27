@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Catalogo do Ministerio de Louvor Adoradores de Cristo com multitracks, letras, capas e links do YouTube.">
+  <meta name="theme-color" content="#0e1a2b">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Adoradores de Cristo">
+  <title>Ministerio Multitracks</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="ambient ambient-a"></div>
+  <div class="ambient ambient-b"></div>
+
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-block">
+        <h1>
+          <span>Minist&eacute;rio de Louvor</span>
+          <span>Adoradores de Cristo</span>
+        </h1>
+      </div>
+
+      <div class="topbar-actions">
+        <button id="open-admin-button" class="ghost-button" type="button">
+          Cadastrar musica
+        </button>
+        <button id="open-assets-button" class="ghost-button" type="button">
+          Capas e links
+        </button>
+      </div>
+    </header>
+
+    <main class="main-layout">
+      <section class="stats-panel panel">
+        <div id="hero-stats" class="hero-stats"></div>
+      </section>
+
+      <section class="workspace-panel">
+        <div class="workspace-head">
+          <div class="screen-switch" role="tablist" aria-label="Telas do catalogo">
+            <button id="screen-elite" class="screen-tab" type="button" data-screen="elite" role="tab" aria-selected="true">
+              Multitracks Elite
+            </button>
+            <button id="screen-alagoa" class="screen-tab" type="button" data-screen="alagoa" role="tab" aria-selected="false">
+              Multitracks Alagoa
+            </button>
+          </div>
+
+          <div class="workspace-tools">
+            <label class="search-field" for="search-input">
+              <span class="sr-only">Buscar musica</span>
+              <input id="search-input" type="search" placeholder="Buscar musica, artista ou observacao">
+            </label>
+
+            <button id="favorites-filter-button" class="ghost-button favorites-filter-button" type="button" aria-pressed="false">
+              Favoritas
+            </button>
+          </div>
+        </div>
+
+        <div id="screen-banner" class="screen-banner"></div>
+
+        <div class="workspace-grid">
+          <section class="songs-panel panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Repertorio</p>
+                <h3 id="songs-title">Musicas do produtor</h3>
+              </div>
+              <span id="songs-count" class="count-pill"></span>
+            </div>
+
+            <div id="song-list" class="song-list" aria-live="polite"></div>
+          </section>
+
+          <aside class="viewer-panel panel" hidden>
+            <div id="song-viewer" class="song-viewer"></div>
+          </aside>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="admin-modal" class="admin-modal is-hidden" aria-hidden="true">
+    <div class="admin-backdrop" data-close-admin="true"></div>
+
+    <section class="admin-dialog" role="dialog" aria-modal="true" aria-labelledby="admin-modal-title">
+      <div class="admin-head">
+        <div>
+          <p class="eyebrow" data-admin-modal-eyebrow>Cadastro</p>
+          <h3 id="admin-modal-title">Cadastro de musica</h3>
+        </div>
+
+        <div class="admin-head-tools">
+          <div id="admin-modal-actions" class="admin-head-actions admin-modal-actions"></div>
+
+          <button class="icon-button" type="button" data-close-admin="true" aria-label="Fechar painel">
+            x
+          </button>
+        </div>
+      </div>
+
+      <div id="admin-flash" class="admin-flash" aria-live="polite"></div>
+
+      <div id="admin-dashboard-view" class="admin-view"></div>
+      <input id="cover-batch-input" type="file" accept="image/*" multiple hidden>
+    </section>
+  </div>
+
+  <div id="lyrics-modal" class="lyrics-modal is-hidden" aria-hidden="true">
+    <div class="lyrics-backdrop" data-close-lyrics="true"></div>
+
+    <section class="lyrics-dialog" role="dialog" aria-modal="true" aria-labelledby="lyrics-modal-title">
+      <div id="lyrics-viewer" class="lyrics-viewer"></div>
+    </section>
+  </div>
+
+  <script src="google-sheets-config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
