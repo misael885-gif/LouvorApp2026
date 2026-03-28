@@ -766,6 +766,8 @@ const state = {
   favoritesOnly: false,
   favorites: new Set(),
   weeklySelectedSongIds: [],
+  weeklySelectionOwners: {},
+  weeklySelectionWeekKey: "",
   coverAssets: new Map(),
   selectedSongId: null,
   lyricsMinistryMode: false,
@@ -855,6 +857,27 @@ function sanitizeSongIdList(input) {
   }
 
   return uniqueIds;
+}
+
+function sanitizeWeeklySelectionOwners(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return {};
+  }
+
+  const nextOwners = {};
+
+  for (const [songId, username] of Object.entries(input)) {
+    const normalizedSongId = cleanText(songId);
+    const normalizedUsername = cleanText(username);
+
+    if (!normalizedSongId || !normalizedUsername) {
+      continue;
+    }
+
+    nextOwners[normalizedSongId] = normalizedUsername;
+  }
+
+  return nextOwners;
 }
 
 function normalizeSearch(value) {
@@ -2538,6 +2561,14 @@ function getWeekStartDate(date = new Date()) {
   return current;
 }
 
+function getCurrentWeekKey(date = new Date()) {
+  const weekStart = getWeekStartDate(date);
+  const year = weekStart.getFullYear();
+  const month = String(weekStart.getMonth() + 1).padStart(2, "0");
+  const day = String(weekStart.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function formatWeekRangeLabel(startDate) {
   const start = new Date(startDate);
   start.setHours(0, 0, 0, 0);
@@ -3139,7 +3170,10 @@ function loadPreferences() {
       ? "alagoa"
       : "elite";
   state.selectedSongId = null;
+  state.weeklySelectionWeekKey = cleanText(stored.weeklySelectionWeekKey) || getCurrentWeekKey();
   state.weeklySelectedSongIds = sanitizeSongIdList(stored.weeklySelectedSongIds);
+  state.weeklySelectionOwners = sanitizeWeeklySelectionOwners(stored.weeklySelectionOwners);
+  ensureWeeklySelectionsCurrentWeek();
   syncWeeklySelectedSongs();
 }
 
@@ -3149,7 +3183,9 @@ function savePreferences() {
     favoritesOnly: state.favoritesOnly,
     favorites: [...state.favorites],
     activeProducer: state.activeProducer,
-    weeklySelectedSongIds: sanitizeSongIdList(state.weeklySelectedSongIds)
+    weeklySelectionWeekKey: cleanText(state.weeklySelectionWeekKey) || getCurrentWeekKey(),
+    weeklySelectedSongIds: sanitizeSongIdList(state.weeklySelectedSongIds),
+    weeklySelectionOwners: sanitizeWeeklySelectionOwners(state.weeklySelectionOwners)
   });
 }
 
@@ -3337,8 +3373,30 @@ function syncWeeklySelectedSongs() {
   const validSongIds = new Set(state.catalog.map((song) => cleanText(song.id)).filter(Boolean));
   const nextWeeklySelectedIds = sanitizeSongIdList(state.weeklySelectedSongIds)
     .filter((songId) => validSongIds.has(songId));
+  const nextOwners = sanitizeWeeklySelectionOwners(state.weeklySelectionOwners);
 
   state.weeklySelectedSongIds = nextWeeklySelectedIds;
+  state.weeklySelectionOwners = Object.fromEntries(
+    Object.entries(nextOwners).filter(([songId]) => nextWeeklySelectedIds.includes(songId))
+  );
+}
+
+function ensureWeeklySelectionsCurrentWeek() {
+  const currentWeekKey = getCurrentWeekKey();
+
+  if (!state.weeklySelectionWeekKey) {
+    state.weeklySelectionWeekKey = currentWeekKey;
+    return false;
+  }
+
+  if (state.weeklySelectionWeekKey === currentWeekKey) {
+    return false;
+  }
+
+  state.weeklySelectionWeekKey = currentWeekKey;
+  state.weeklySelectedSongIds = [];
+  state.weeklySelectionOwners = {};
+  return true;
 }
 
 function getWeeklySelectedSongs() {
@@ -3354,6 +3412,17 @@ function isWeeklySelected(songId) {
   return state.weeklySelectedSongIds.includes(normalizedSongId);
 }
 
+function canManageWeeklySelection(songId) {
+  if (isAdminUser()) {
+    return true;
+  }
+
+  const normalizedSongId = cleanText(songId);
+  const owner = cleanText(state.weeklySelectionOwners?.[normalizedSongId]);
+
+  return Boolean(owner) && normalizeSearch(owner) === normalizeSearch(state.currentMemberUsername);
+}
+
 function removeSongFromWeeklySelections(songId) {
   const normalizedSongId = cleanText(songId);
 
@@ -3361,7 +3430,13 @@ function removeSongFromWeeklySelections(songId) {
     return;
   }
 
+  if (!canManageWeeklySelection(normalizedSongId)) {
+    setFlash("So quem adicionou essa musica da semana ou o admin pode remover.", "error");
+    return;
+  }
+
   state.weeklySelectedSongIds = state.weeklySelectedSongIds.filter((currentSongId) => currentSongId !== normalizedSongId);
+  delete state.weeklySelectionOwners[normalizedSongId];
   renderAll();
   setFlash("Musica removida das selecionadas da semana.", "success");
 }
@@ -3377,6 +3452,7 @@ function addSongToWeeklySelections(songId) {
 
   if (!isWeeklySelected(normalizedSongId)) {
     state.weeklySelectedSongIds = [...state.weeklySelectedSongIds, normalizedSongId];
+    state.weeklySelectionOwners[normalizedSongId] = cleanText(state.currentMemberUsername) || "admin";
   }
 
   state.lyricsMinistryMode = false;
@@ -3617,9 +3693,13 @@ function renderWeeklySelectionsPanel() {
             </div>
           </button>
 
-          <button class="danger-button weekly-selection-remove" type="button" data-remove-weekly-song="${escapeHtml(song.id)}">
-            Remover
-          </button>
+          ${
+            canManageWeeklySelection(song.id)
+              ? `<button class="danger-button weekly-selection-remove" type="button" data-remove-weekly-song="${escapeHtml(song.id)}">
+                  Remover
+                </button>`
+              : ""
+          }
         </article>
       `).join("")}
     </div>
@@ -4423,6 +4503,7 @@ function renderAdminViews() {
 }
 
 function renderAll() {
+  ensureWeeklySelectionsCurrentWeek();
   syncWeeklySelectedSongs();
   ensureSelectedSong();
   syncHash();
@@ -4834,15 +4915,15 @@ async function handleAccessLoginSubmit(event) {
       setFlash("Administrador conectado com sucesso.", "success");
       return;
     } catch (adminError) {
-      if (!state.memberAccounts.length && !state.memberRecords.length) {
-        throw adminError;
-      }
-
       if (isCloudModeActive()) {
         try {
           await signInMemberCloud(username, password);
         } catch (cloudMemberError) {
-          signInMemberLocal(username, password);
+          if (state.memberRecords.length) {
+            signInMemberLocal(username, password);
+          } else {
+            throw cloudMemberError;
+          }
         }
       } else {
         signInMemberLocal(username, password);

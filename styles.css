@@ -521,14 +521,15 @@ a {
 
 .weekly-selections-list {
   display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 14px;
 }
 
 .weekly-selection-card {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 14px;
-  align-items: center;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  align-items: stretch;
   padding: 14px;
   border-radius: 22px;
   border: 1px solid var(--line);
@@ -537,19 +538,19 @@ a {
 
 .weekly-selection-open {
   display: grid;
-  grid-template-columns: 88px minmax(0, 1fr);
-  gap: 14px;
-  align-items: center;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  align-items: start;
   padding: 0;
   border: 0;
   background: transparent;
   color: var(--text);
-  text-align: left;
+  text-align: center;
   cursor: pointer;
 }
 
 .weekly-selection-open .cover-recent {
-  width: 88px;
+  width: 100%;
   aspect-ratio: 0.9;
   border-radius: 16px;
 }
@@ -557,6 +558,7 @@ a {
 .weekly-selection-copy {
   display: grid;
   gap: 4px;
+  justify-items: center;
 }
 
 .weekly-selection-copy strong {
@@ -571,6 +573,7 @@ a {
 
 .weekly-selection-remove {
   min-height: 40px;
+  width: 100%;
 }
 
 .recent-additions-empty {
