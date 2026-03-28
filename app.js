@@ -4664,15 +4664,15 @@ function buildAccessSettingsMarkup() {
 
         <div class="admin-settings-divider"></div>
 
-        <form id="member-access-form" class="admin-form-grid">
+        <form id="member-access-form" class="admin-form-grid" autocomplete="off">
           <div class="field-block">
             <label for="member-access-username">Usuario do membro</label>
-            <input id="member-access-username" class="admin-input" name="member-username" type="text" placeholder="Usuario para entrar no app">
+            <input id="member-access-username" class="admin-input" name="member-username" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" data-lpignore="true" placeholder="Usuario para entrar no app">
           </div>
 
           <div class="field-block">
             <label for="member-access-password">Senha do membro</label>
-            <input id="member-access-password" class="admin-input" name="member-password" type="password" placeholder="Senha do membro">
+            <input id="member-access-password" class="admin-input" name="member-password" type="password" autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false" data-lpignore="true" placeholder="Senha do membro">
           </div>
 
           <div class="field-block full inline-actions">
@@ -4686,6 +4686,35 @@ function buildAccessSettingsMarkup() {
       </div>
     </section>
   `;
+}
+
+function clearMemberAccessFormFields() {
+  const memberAccessForm = elements.adminModal?.querySelector("#member-access-form");
+
+  if (!(memberAccessForm instanceof HTMLFormElement)) {
+    return;
+  }
+
+  const resetFields = () => {
+    memberAccessForm.reset();
+
+    const usernameInput = memberAccessForm.querySelector('input[name="member-username"]');
+    const passwordInput = memberAccessForm.querySelector('input[name="member-password"]');
+
+    if (usernameInput instanceof HTMLInputElement) {
+      usernameInput.value = "";
+      usernameInput.setAttribute("value", "");
+    }
+
+    if (passwordInput instanceof HTMLInputElement) {
+      passwordInput.value = "";
+      passwordInput.setAttribute("value", "");
+    }
+  };
+
+  resetFields();
+  window.setTimeout(resetFields, 0);
+  window.setTimeout(resetFields, 180);
 }
 
 function buildCreateSongFormMarkup() {
@@ -4953,6 +4982,9 @@ async function openAdminModal(mode = "create") {
   elements.adminModal.classList.remove("is-hidden");
   elements.adminModal.setAttribute("aria-hidden", "false");
   document.body.style.overflow = "hidden";
+  if (isAdminUsersMode()) {
+    clearMemberAccessFormFields();
+  }
   focusAdminSongForm();
 
   if (isGoogleSheetsConfigured()) {
@@ -4960,6 +4992,9 @@ async function openAdminModal(mode = "create") {
       await refreshCloudAdminState();
       applyAppMeta(await fetchCloudAppMeta());
       renderAdminViews();
+      if (isAdminUsersMode()) {
+        clearMemberAccessFormFields();
+      }
       focusAdminSongForm();
     } catch (error) {
       console.warn("Nao consegui atualizar a escala e os acessos antes de abrir o painel.", error);
@@ -5421,6 +5456,7 @@ async function handleMemberAccessSubmit(event) {
       ? await saveMemberToCloud(username, password)
       : (saveMemberLocally(username, password), { savedInCloud: false });
     event.target.reset();
+    clearMemberAccessFormFields();
     renderAll();
     setFlash(
       result?.savedInCloud === false
