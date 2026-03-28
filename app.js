@@ -1667,7 +1667,16 @@ async function requestCloudApi(action, payload = {}, options = {}) {
     }
 
     if (!response.ok || data.ok === false) {
-      throw new Error(cleanText(data?.error) || "Nao consegui falar com o Google Sheets.");
+      const normalizedError = cleanText(data?.error);
+
+      if (
+        ["settings", "saveSharedState"].includes(cleanText(action))
+        && /Acao (GET|POST) invalida/i.test(normalizedError)
+      ) {
+        throw new Error("O Apps Script publicado ainda esta desatualizado. Cole novamente o arquivo google-apps-script-backend.gs e publique o Web App.");
+      }
+
+      throw new Error(normalizedError || "Nao consegui falar com o Google Sheets.");
     }
 
     return data;
@@ -3774,7 +3783,7 @@ function removeSongFromWeeklySelections(songId) {
   writeAppMetaCache(buildSharedAppStatePayload());
   queueSharedStateSync({
     immediate: true,
-    silent: true
+    silent: false
   });
   renderAll();
   setFlash("Musica removida das selecionadas da semana.", "success");
@@ -3799,7 +3808,7 @@ function addSongToWeeklySelections(songId) {
   writeAppMetaCache(buildSharedAppStatePayload());
   queueSharedStateSync({
     immediate: true,
-    silent: true
+    silent: false
   });
   renderAll();
 
@@ -4044,7 +4053,7 @@ function shiftWeeklySelector(direction) {
   });
   queueSharedStateSync({
     immediate: true,
-    silent: true
+    silent: false
   });
   renderAll();
 }
