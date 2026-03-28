@@ -4665,14 +4665,17 @@ function buildAccessSettingsMarkup() {
         <div class="admin-settings-divider"></div>
 
         <form id="member-access-form" class="admin-form-grid" autocomplete="off">
+          <input class="autofill-decoy" type="text" name="username" autocomplete="username" tabindex="-1" aria-hidden="true">
+          <input class="autofill-decoy" type="password" name="password" autocomplete="current-password" tabindex="-1" aria-hidden="true">
+
           <div class="field-block">
-            <label for="member-access-username">Usuario do membro</label>
-            <input id="member-access-username" class="admin-input" name="member-username" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" data-lpignore="true" placeholder="Usuario para entrar no app">
+            <label for="member-access-user-field">Usuario do membro</label>
+            <input id="member-access-user-field" class="admin-input" name="member-access-user-field" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" data-lpignore="true" data-form-role="member-access" data-unlock-on-focus="true" readonly placeholder="Usuario para entrar no app">
           </div>
 
           <div class="field-block">
-            <label for="member-access-password">Senha do membro</label>
-            <input id="member-access-password" class="admin-input" name="member-password" type="password" autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false" data-lpignore="true" placeholder="Senha do membro">
+            <label for="member-access-secret-field">Senha do membro</label>
+            <input id="member-access-secret-field" class="admin-input" name="member-access-secret-field" type="password" autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false" data-lpignore="true" data-form-role="member-access" data-unlock-on-focus="true" readonly placeholder="Senha do membro">
           </div>
 
           <div class="field-block full inline-actions">
@@ -4698,17 +4701,31 @@ function clearMemberAccessFormFields() {
   const resetFields = () => {
     memberAccessForm.reset();
 
-    const usernameInput = memberAccessForm.querySelector('input[name="member-username"]');
-    const passwordInput = memberAccessForm.querySelector('input[name="member-password"]');
+    const usernameInput = memberAccessForm.querySelector('input[name="member-access-user-field"]');
+    const passwordInput = memberAccessForm.querySelector('input[name="member-access-secret-field"]');
+    const decoyUsernameInput = memberAccessForm.querySelector('input[name="username"]');
+    const decoyPasswordInput = memberAccessForm.querySelector('input[name="password"]');
 
     if (usernameInput instanceof HTMLInputElement) {
       usernameInput.value = "";
       usernameInput.setAttribute("value", "");
+      usernameInput.setAttribute("readonly", "readonly");
     }
 
     if (passwordInput instanceof HTMLInputElement) {
       passwordInput.value = "";
       passwordInput.setAttribute("value", "");
+      passwordInput.setAttribute("readonly", "readonly");
+    }
+
+    if (decoyUsernameInput instanceof HTMLInputElement) {
+      decoyUsernameInput.value = "";
+      decoyUsernameInput.setAttribute("value", "");
+    }
+
+    if (decoyPasswordInput instanceof HTMLInputElement) {
+      decoyPasswordInput.value = "";
+      decoyPasswordInput.setAttribute("value", "");
     }
   };
 
@@ -5438,8 +5455,8 @@ async function handleMemberAccessSubmit(event) {
   event.preventDefault();
 
   const formData = new FormData(event.target);
-  const username = cleanText(formData.get("member-username"));
-  const password = cleanText(formData.get("member-password"));
+  const username = cleanText(formData.get("member-access-user-field"));
+  const password = cleanText(formData.get("member-access-secret-field"));
 
   if (!username || !password) {
     setFlash("Preencha usuario e senha para criar o acesso do membro.", "error");
@@ -5875,6 +5892,16 @@ function bindEvents() {
     if (["song-title", "song-artist"].includes(event.target.id)) {
       updateAdminCoverPreview();
     }
+  });
+
+  elements.adminModal.addEventListener("focusin", (event) => {
+    const unlockField = event.target.closest("[data-unlock-on-focus='true']");
+
+    if (!(unlockField instanceof HTMLInputElement)) {
+      return;
+    }
+
+    unlockField.removeAttribute("readonly");
   });
 
   elements.adminModal.addEventListener("change", async (event) => {
