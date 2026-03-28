@@ -281,7 +281,7 @@ a {
 }
 
 .hero-stats {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 14px;
 }
 
@@ -290,11 +290,43 @@ a {
   padding: 16px 18px;
 }
 
+.stat-card-centered {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  text-align: center;
+}
+
+.stat-card-centered .eyebrow,
+.stat-card-centered strong {
+  width: 100%;
+  text-align: center;
+}
+
+.stat-card-centered .eyebrow {
+  font-size: 0.98rem;
+  letter-spacing: 0.18em;
+}
+
+.stat-card-centered strong {
+  font-size: clamp(2.05rem, 3vw, 2.9rem);
+  line-height: 1;
+}
+
 .stat-card strong {
   display: block;
   margin-bottom: 6px;
   font-size: clamp(1.5rem, 2vw, 2rem);
   font-family: Georgia, "Palatino Linotype", serif;
+}
+
+.stat-subcopy {
+  display: block;
+  margin-top: 8px;
+  color: rgba(239, 245, 255, 0.74);
+  font-size: 0.88rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 .workspace-head {
@@ -405,6 +437,145 @@ a {
   font-size: clamp(2rem, 3.2vw, 3rem);
   line-height: 0.98;
   text-align: center;
+}
+
+.banner-welcome {
+  margin: 12px 0 0;
+  color: rgba(239, 245, 255, 0.82);
+  font-size: clamp(1.02rem, 1.35vw, 1.16rem);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.recent-additions-panel {
+  display: grid;
+  gap: 16px;
+  padding-block: 20px;
+}
+
+.recent-additions-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.recent-additions-head .eyebrow {
+  font-size: 0.92rem;
+  letter-spacing: 0.16em;
+}
+
+.recent-additions-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 14px;
+}
+
+.recent-song-card {
+  display: grid;
+  gap: 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.recent-song-card.is-disabled {
+  opacity: 0.72;
+}
+
+.recent-song-open {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.recent-song-open.is-disabled {
+  cursor: default;
+}
+
+.recent-song-card .cover-recent,
+.recent-song-open .cover-recent {
+  width: 100%;
+  aspect-ratio: 0.9;
+  border-radius: 18px;
+}
+
+.recent-song-delete {
+  min-height: 36px;
+  padding-inline: 12px;
+  font-size: 0.82rem;
+}
+
+.weekly-selections-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.weekly-selections-head h3 {
+  margin: 4px 0 0;
+  font-size: 1.22rem;
+}
+
+.weekly-selections-list {
+  display: grid;
+  gap: 14px;
+}
+
+.weekly-selection-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 14px;
+  border-radius: 22px;
+  border: 1px solid var(--line);
+  background: linear-gradient(170deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02));
+}
+
+.weekly-selection-open {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.weekly-selection-open .cover-recent {
+  width: 88px;
+  aspect-ratio: 0.9;
+  border-radius: 16px;
+}
+
+.weekly-selection-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.weekly-selection-copy strong {
+  font-size: 1rem;
+  line-height: 1.2;
+}
+
+.weekly-selection-copy span {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.weekly-selection-remove {
+  min-height: 40px;
+}
+
+.recent-additions-empty {
+  margin: 0;
+  color: var(--muted);
 }
 
 .badge-row,
@@ -651,6 +822,13 @@ a {
 }
 
 .cover-card {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  border: 0;
+}
+
+.cover-recent {
   width: 100%;
   height: 100%;
   border-radius: inherit;
@@ -945,6 +1123,63 @@ a {
   text-align: center;
 }
 
+.member-login-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 18;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+}
+
+.member-login-overlay.is-hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.member-login-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(3, 8, 14, 0.82);
+  backdrop-filter: blur(10px);
+}
+
+.member-login-card {
+  position: relative;
+  z-index: 1;
+  width: min(540px, 100%);
+  padding: 28px;
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--line-strong);
+  background:
+    radial-gradient(circle at top right, rgba(242, 191, 99, 0.09), transparent 20%),
+    radial-gradient(circle at top left, rgba(81, 197, 180, 0.08), transparent 18%),
+    linear-gradient(170deg, rgba(7, 17, 28, 0.98), rgba(10, 22, 36, 0.96));
+  box-shadow: var(--shadow);
+}
+
+.member-login-copy {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.member-login-copy h2 {
+  margin: 0;
+  font-family: Georgia, "Palatino Linotype", serif;
+  font-size: clamp(1.9rem, 3vw, 2.5rem);
+  letter-spacing: -0.04em;
+}
+
+.member-login-form {
+  grid-template-columns: 1fr;
+}
+
+.member-login-form .admin-flash {
+  min-height: 0;
+}
+
 .admin-modal {
   position: fixed;
   inset: 0;
@@ -1123,7 +1358,12 @@ a {
 }
 
 .admin-shell-create {
-  width: min(100%, 760px);
+  width: min(100%, 920px);
+  margin: 0 auto;
+}
+
+.admin-shell-users {
+  width: min(100%, 920px);
   margin: 0 auto;
 }
 
@@ -1171,6 +1411,59 @@ a {
 
 .admin-intro-copy {
   margin: 0 0 18px;
+}
+
+.admin-settings-card {
+  margin-top: 20px;
+}
+
+.admin-settings-stack {
+  display: grid;
+  gap: 20px;
+}
+
+.admin-settings-divider {
+  height: 1px;
+  background: var(--line);
+}
+
+.admin-field-align-end {
+  display: flex;
+  align-items: end;
+}
+
+.member-access-list {
+  display: grid;
+  gap: 12px;
+}
+
+.member-access-item,
+.member-access-empty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 18px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.member-access-item strong,
+.member-access-empty strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.member-access-item span,
+.member-access-empty p {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.member-access-empty {
+  align-items: start;
+  flex-direction: column;
 }
 
 .admin-cover-upload {
@@ -1551,6 +1844,12 @@ a {
     grid-template-columns: 1fr;
   }
 
+  .member-access-item,
+  .member-access-empty {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .lyrics-head,
   .lyrics-main-head {
     flex-direction: column;
@@ -1588,6 +1887,10 @@ a {
 
   .admin-song-top {
     flex-direction: column;
+  }
+
+  .member-login-card {
+    padding: 22px;
   }
 
   .song-list {

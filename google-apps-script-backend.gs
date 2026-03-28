@@ -13,6 +13,9 @@ const SONG_HEADERS = [
   "coverFileId"
 ];
 
+const DEFAULT_ROTATION_NAMES = ["Daniela", "Mileide", "Tamires"];
+const DEFAULT_ROTATION_ANCHOR = "2026-03-23";
+
 function doGet(e) {
   try {
     const action = cleanValue(e && e.parameter && e.parameter.action);
@@ -34,6 +37,10 @@ function doGet(e) {
       });
     }
 
+    if (action === "settings") {
+      return jsonResponse(buildPublicSettings_());
+    }
+
     return jsonResponse({
       ok: false,
       error: "Acao GET invalida."
@@ -52,7 +59,7 @@ function doPost(e) {
     const action = cleanValue(payload.action);
 
     if (action === "login") {
-      requireAdminKey_(payload.adminKey);
+      requireAdminLogin_(payload.username, payload.adminKey);
       return jsonResponse({ ok: true });
     }
 
@@ -72,6 +79,71 @@ function doPost(e) {
       requireAdminKey_(payload.adminKey);
       const uploadedCover = saveCover_(payload.songId, payload.producer, payload.coverDataUrl, payload.extension);
       return jsonResponse({ ok: true, coverUrl: uploadedCover.coverUrl, coverFileId: uploadedCover.coverFileId });
+    }
+
+    if (action === "saveRotationSettings") {
+      requireAdminKey_(payload.adminKey);
+      const savedRotation = saveRotationSettings_(payload.rotationNames, payload.rotationAnchor);
+      const publicSettings = buildPublicSettings_();
+      return jsonResponse({
+        ok: true,
+        rotationNames: savedRotation.rotationNames,
+        rotationAnchor: savedRotation.rotationAnchor,
+        memberLoginRequired: publicSettings.memberLoginRequired,
+        memberUsernames: publicSettings.memberUsernames
+      });
+    }
+
+    if (action === "listMembers") {
+      requireAdminKey_(payload.adminKey);
+      return jsonResponse({
+        ok: true,
+        members: readMembers_().map(function(member) {
+          return {
+            username: member.username,
+            createdAt: member.createdAt,
+            updatedAt: member.updatedAt
+          };
+        })
+      });
+    }
+
+    if (action === "saveMember") {
+      requireAdminKey_(payload.adminKey);
+      const members = saveMember_(payload.username, payload.passwordHash);
+      return jsonResponse({
+        ok: true,
+        members: members.map(function(member) {
+          return {
+            username: member.username,
+            createdAt: member.createdAt,
+            updatedAt: member.updatedAt
+          };
+        })
+      });
+    }
+
+    if (action === "deleteMember") {
+      requireAdminKey_(payload.adminKey);
+      const members = deleteMember_(payload.username);
+      return jsonResponse({
+        ok: true,
+        members: members.map(function(member) {
+          return {
+            username: member.username,
+            createdAt: member.createdAt,
+            updatedAt: member.updatedAt
+          };
+        })
+      });
+    }
+
+    if (action === "memberLogin") {
+      const member = validateMemberLogin_(payload.username, payload.passwordHash);
+      return jsonResponse({
+        ok: true,
+        username: member.username
+      });
     }
 
     return jsonResponse({
@@ -99,6 +171,7 @@ function getSettings_() {
   const sheetId = normalizeGoogleResourceId_(rawSheetId);
   const coversFolderId = normalizeGoogleResourceId_(rawCoversFolderId);
   const adminKey = cleanValue(properties.getProperty("ADMIN_KEY"));
+  const adminUsername = cleanValue(properties.getProperty("ADMIN_USERNAME")) || "admin";
 
   if (!rawSheetId) {
     throw new Error("SHEET_ID nao configurado.");
@@ -123,7 +196,8 @@ function getSettings_() {
   return {
     sheetId: sheetId,
     coversFolderId: coversFolderId,
-    adminKey: adminKey
+    adminKey: adminKey,
+    adminUsername: adminUsername
   };
 }
 
@@ -133,6 +207,17 @@ function requireAdminKey_(receivedKey) {
 
   if (!normalizedKey || normalizedKey !== settings.adminKey) {
     throw new Error("Chave admin invalida.");
+  }
+}
+
+function requireAdminLogin_(username, receivedKey) {
+  const settings = getSettings_();
+  const normalizedUsername = normalizeMemberUsername_(username || "admin");
+  const normalizedAdminUsername = normalizeMemberUsername_(settings.adminUsername || "admin");
+  const normalizedKey = cleanValue(receivedKey);
+
+  if (!normalizedUsername || normalizedUsername !== normalizedAdminUsername || !normalizedKey || normalizedKey !== settings.adminKey) {
+    throw new Error("Usuario ou senha do administrador invalidos.");
   }
 }
 
@@ -341,6 +426,215 @@ function normalizeSong_(song) {
     updatedAt: cleanValue(song.updatedAt) || now,
     coverFileId: cleanValue(song.coverFileId)
   };
+}
+
+function buildPublicSettings_() {
+  const rotationSettings = readRotationSettings_();
+  const members = readMembers_();
+
+  return {
+    ok: true,
+    rotationNames: rotationSettings.rotationNames,
+    rotationAnchor: rotationSettings.rotationAnchor,
+    memberLoginRequired: members.length > 0,
+    memberUsernames: members.map(function(member) {
+      return member.username;
+    })
+  };
+}
+
+function readRotationSettings_() {
+  const properties = PropertiesService.getScriptProperties();
+  var parsedRotationNames;
+
+  try {
+    parsedRotationNames = JSON.parse(cleanValue(properties.getProperty("ROTATION_NAMES_JSON")) || "[]");
+  } catch (error) {
+    parsedRotationNames = [];
+  }
+
+  return {
+    rotationNames: sanitizeRotationNames_(parsedRotationNames),
+    rotationAnchor: normalizeRotationAnchor_(properties.getProperty("ROTATION_ANCHOR"))
+  };
+}
+
+function saveRotationSettings_(rotationNames, rotationAnchor) {
+  const properties = PropertiesService.getScriptProperties();
+  const normalizedRotationNames = sanitizeRotationNames_(rotationNames);
+  const normalizedRotationAnchor = normalizeRotationAnchor_(rotationAnchor);
+
+  properties.setProperty("ROTATION_NAMES_JSON", JSON.stringify(normalizedRotationNames));
+  properties.setProperty("ROTATION_ANCHOR", normalizedRotationAnchor);
+
+  return {
+    rotationNames: normalizedRotationNames,
+    rotationAnchor: normalizedRotationAnchor
+  };
+}
+
+function readMembers_() {
+  const properties = PropertiesService.getScriptProperties();
+  var parsedMembers;
+
+  try {
+    parsedMembers = JSON.parse(cleanValue(properties.getProperty("MEMBER_ACCOUNTS_JSON")) || "[]");
+  } catch (error) {
+    parsedMembers = [];
+  }
+
+  return (Array.isArray(parsedMembers) ? parsedMembers : [])
+    .map(function(member) {
+      return {
+        username: cleanValue(member.username),
+        usernameKey: normalizeMemberUsername_(member.usernameKey || member.username),
+        passwordHash: cleanValue(member.passwordHash),
+        createdAt: cleanValue(member.createdAt),
+        updatedAt: cleanValue(member.updatedAt)
+      };
+    })
+    .filter(function(member) {
+      return member.username && member.usernameKey && member.passwordHash;
+    })
+    .sort(function(leftMember, rightMember) {
+      return leftMember.username.localeCompare(rightMember.username);
+    });
+}
+
+function writeMembers_(members) {
+  const normalizedMembers = (Array.isArray(members) ? members : [])
+    .map(function(member) {
+      return {
+        username: cleanValue(member.username),
+        usernameKey: normalizeMemberUsername_(member.usernameKey || member.username),
+        passwordHash: cleanValue(member.passwordHash),
+        createdAt: cleanValue(member.createdAt),
+        updatedAt: cleanValue(member.updatedAt)
+      };
+    })
+    .filter(function(member) {
+      return member.username && member.usernameKey && member.passwordHash;
+    })
+    .sort(function(leftMember, rightMember) {
+      return leftMember.username.localeCompare(rightMember.username);
+    });
+
+  PropertiesService.getScriptProperties().setProperty("MEMBER_ACCOUNTS_JSON", JSON.stringify(normalizedMembers));
+  return normalizedMembers;
+}
+
+function saveMember_(username, passwordHash) {
+  const normalizedUsername = cleanValue(username);
+  const usernameKey = normalizeMemberUsername_(username);
+  const normalizedPasswordHash = cleanValue(passwordHash);
+
+  if (!normalizedUsername || !usernameKey || !normalizedPasswordHash) {
+    throw new Error("Usuario e senha do membro sao obrigatorios.");
+  }
+
+  const now = new Date().toISOString();
+  const members = readMembers_();
+  const nextMembers = [];
+  var updated = false;
+
+  for (var index = 0; index < members.length; index += 1) {
+    var member = members[index];
+
+    if (member.usernameKey !== usernameKey) {
+      nextMembers.push(member);
+      continue;
+    }
+
+    nextMembers.push({
+      username: normalizedUsername,
+      usernameKey: usernameKey,
+      passwordHash: normalizedPasswordHash,
+      createdAt: member.createdAt || now,
+      updatedAt: now
+    });
+    updated = true;
+  }
+
+  if (!updated) {
+    nextMembers.push({
+      username: normalizedUsername,
+      usernameKey: usernameKey,
+      passwordHash: normalizedPasswordHash,
+      createdAt: now,
+      updatedAt: now
+    });
+  }
+
+  return writeMembers_(nextMembers);
+}
+
+function deleteMember_(username) {
+  const usernameKey = normalizeMemberUsername_(username);
+
+  if (!usernameKey) {
+    throw new Error("Usuario do membro invalido.");
+  }
+
+  return writeMembers_(readMembers_().filter(function(member) {
+    return member.usernameKey !== usernameKey;
+  }));
+}
+
+function validateMemberLogin_(username, passwordHash) {
+  const usernameKey = normalizeMemberUsername_(username);
+  const normalizedPasswordHash = cleanValue(passwordHash);
+
+  if (!usernameKey || !normalizedPasswordHash) {
+    throw new Error("Usuario ou senha do membro invalidos.");
+  }
+
+  var members = readMembers_();
+
+  for (var index = 0; index < members.length; index += 1) {
+    if (members[index].usernameKey === usernameKey && members[index].passwordHash === normalizedPasswordHash) {
+      return members[index];
+    }
+  }
+
+  throw new Error("Usuario ou senha do membro incorretos.");
+}
+
+function sanitizeRotationNames_(rotationNames) {
+  var source = rotationNames;
+
+  if (!Array.isArray(source)) {
+    source = cleanValue(rotationNames)
+      .split(/\r?\n|,/)
+      .map(function(entry) {
+        return cleanValue(entry);
+      });
+  }
+
+  var uniqueNames = [];
+  var seen = {};
+
+  for (var index = 0; index < source.length; index += 1) {
+    var currentName = cleanValue(source[index]);
+    var currentKey = normalizeMemberUsername_(currentName);
+
+    if (!currentName || !currentKey || seen[currentKey]) {
+      continue;
+    }
+
+    seen[currentKey] = true;
+    uniqueNames.push(currentName);
+  }
+
+  return uniqueNames.length ? uniqueNames : DEFAULT_ROTATION_NAMES.slice();
+}
+
+function normalizeRotationAnchor_(value) {
+  var normalizedValue = cleanValue(value);
+  return /^\d{4}-\d{2}-\d{2}$/.test(normalizedValue) ? normalizedValue : DEFAULT_ROTATION_ANCHOR;
+}
+
+function normalizeMemberUsername_(value) {
+  return cleanValue(value).toLowerCase();
 }
 
 function getContentTypeFromDataUrl_(dataUrl) {

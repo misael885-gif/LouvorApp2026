@@ -6,7 +6,10 @@ const STORAGE_KEYS = {
   preferences: "ministerio-multitracks-preferences-v5",
   adminConfig: "ministerio-multitracks-admin-config-v2",
   adminSession: "ministerio-multitracks-admin-session-v2",
-  cloudAdminKey: "ministerio-multitracks-cloud-admin-key-v2"
+  cloudAdminKey: "ministerio-multitracks-cloud-admin-key-v2",
+  appMeta: "ministerio-multitracks-app-meta-v1",
+  memberSession: "ministerio-multitracks-member-session-v1",
+  accessSession: "ministerio-multitracks-access-session-v1"
 };
 
 const SEED_CATALOG_ENABLED = true;
@@ -15,6 +18,13 @@ const ENABLED_SEED_PRODUCERS = new Set(["elite", "alagoa"]);
 const CATALOG_MIGRATIONS = {
   replaceAlagoaMarch2026: "2026-03-27-replace-alagoa-catalog-v1",
   replaceEliteMarch2026: "2026-03-27-replace-elite-catalog-v1"
+};
+
+const WEEKLY_SELECTOR_ROTATION = ["Daniela", "Mileide", "Tamires"];
+const WEEKLY_SELECTOR_ANCHOR = {
+  year: 2026,
+  month: 3,
+  day: 23
 };
 
 const COVER_ASSET_DB = {
@@ -720,6 +730,8 @@ const elements = {
   screenElite: document.querySelector("#screen-elite"),
   screenAlagoa: document.querySelector("#screen-alagoa"),
   screenBanner: document.querySelector("#screen-banner"),
+  recentAdditionsPanel: document.querySelector("#recent-additions-panel"),
+  weeklySelectionsPanel: document.querySelector("#weekly-selections-panel"),
   searchInput: document.querySelector("#search-input"),
   favoritesFilterButton: document.querySelector("#favorites-filter-button"),
   workspaceGrid: document.querySelector(".workspace-grid"),
@@ -731,7 +743,12 @@ const elements = {
   lyricsModal: document.querySelector("#lyrics-modal"),
   lyricsViewer: document.querySelector("#lyrics-viewer"),
   openAdminButton: document.querySelector("#open-admin-button"),
+  openUsersButton: document.querySelector("#open-users-button"),
   openAssetsButton: document.querySelector("#open-assets-button"),
+  memberLogoutButton: document.querySelector("#member-logout-button"),
+  memberLoginOverlay: document.querySelector("#member-login-overlay"),
+  memberLoginForm: document.querySelector("#member-login-form"),
+  memberLoginFlash: document.querySelector("#member-login-flash"),
   adminModal: document.querySelector("#admin-modal"),
   adminModalEyebrow: document.querySelector("[data-admin-modal-eyebrow]"),
   adminModalTitle: document.querySelector("#admin-modal-title"),
@@ -748,10 +765,11 @@ const state = {
   query: "",
   favoritesOnly: false,
   favorites: new Set(),
+  weeklySelectedSongIds: [],
   coverAssets: new Map(),
   selectedSongId: null,
   lyricsMinistryMode: false,
-  adminLoggedIn: true,
+  adminLoggedIn: false,
   adminModalMode: "create",
   syncMode: "local",
   editingSongId: null,
@@ -761,6 +779,14 @@ const state = {
   adminFilter: "",
   deletedCatalogKeys: new Set(),
   cloudAdminKey: "",
+  rotationNames: [...WEEKLY_SELECTOR_ROTATION],
+  rotationAnchor: `${WEEKLY_SELECTOR_ANCHOR.year}-${String(WEEKLY_SELECTOR_ANCHOR.month).padStart(2, "0")}-${String(WEEKLY_SELECTOR_ANCHOR.day).padStart(2, "0")}`,
+  memberLoginRequired: false,
+  memberAccounts: [],
+  memberRecords: [],
+  currentMemberUsername: "",
+  currentAccessRole: "guest",
+  memberLoggedIn: false,
   isMigratingCatalog: false,
   isRestoringSeedCatalog: false,
   isClearingAllCovers: false,
@@ -807,6 +833,28 @@ function cleanMultilineText(value) {
 
 function preserveInputText(value) {
   return String(value || "");
+}
+
+function sanitizeSongIdList(input) {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  const uniqueIds = [];
+  const seenIds = new Set();
+
+  for (const value of input) {
+    const normalizedValue = cleanText(value);
+
+    if (!normalizedValue || seenIds.has(normalizedValue)) {
+      continue;
+    }
+
+    seenIds.add(normalizedValue);
+    uniqueIds.push(normalizedValue);
+  }
+
+  return uniqueIds;
 }
 
 function normalizeSearch(value) {
@@ -1503,7 +1551,8 @@ function findSongForBatchCover(fileName, lookup) {
 }
 
 function setAdminSessionFromCloud(session) {
-  state.adminLoggedIn = Boolean(session);
+  state.cloudAdminKey = cleanText(session);
+  state.adminLoggedIn = Boolean(state.cloudAdminKey) && state.currentAccessRole === "admin";
 }
 
 async function ensureCloudClient() {
@@ -1592,7 +1641,7 @@ async function requestCloudApi(action, payload = {}, options = {}) {
 async function refreshCloudAdminState() {
   if (!isGoogleSheetsConfigured()) {
     state.syncMode = "local";
-    state.adminLoggedIn = true;
+    state.adminLoggedIn = state.currentAccessRole === "admin";
     state.cloudAdminKey = "";
     return;
   }
@@ -1601,7 +1650,7 @@ async function refreshCloudAdminState() {
 
   if (!services) {
     state.syncMode = "local";
-    state.adminLoggedIn = true;
+    state.adminLoggedIn = state.currentAccessRole === "admin";
     state.cloudAdminKey = "";
     return;
   }
@@ -1627,6 +1676,169 @@ async function fetchCloudCatalog(options = {}) {
   const nextCatalog = seedBacked ? buildSeedBackedCatalog(normalizedRows) : normalizedRows;
 
   return includeDeleted ? nextCatalog : filterDeletedCatalogSongs(nextCatalog);
+}
+
+async function fetchCloudAppMeta() {
+  if (!isGoogleSheetsConfigured()) {
+    return readAppMetaCache();
+  }
+
+  try {
+    const cloudMetaCache = readAppMetaCache();
+    const result = await requestCloudApi("settings", {}, {
+      method: "GET",
+      includeAdminKey: false
+    });
+    const mergedMembers = mergeMemberAccountsWithLocalRecords(
+      Array.isArray(result?.memberUsernames)
+        ? result.memberUsernames.map((member) => cleanText(member)).filter(Boolean)
+        : cloudMetaCache.memberAccounts
+    );
+    const nextMeta = {
+      rotationNames: sanitizeRotationNames(result?.rotationNames),
+      rotationAnchor: normalizeRotationAnchorValue(result?.rotationAnchor),
+      memberLoginRequired: Boolean(result?.memberLoginRequired) || mergedMembers.memberAccounts.length > 0,
+      memberAccounts: mergedMembers.memberAccounts,
+      memberRecords: mergedMembers.memberRecords
+    };
+
+    writeAppMetaCache(nextMeta);
+    return nextMeta;
+  } catch (error) {
+    console.warn("Nao consegui ler as configuracoes extras da nuvem. Mantendo o cache local.", error);
+    return readAppMetaCache();
+  }
+}
+
+async function saveRotationSettingsToCloud(rotationNames, rotationAnchor) {
+  const result = await requestCloudApi("saveRotationSettings", {
+    rotationNames: sanitizeRotationNames(rotationNames),
+    rotationAnchor: normalizeRotationAnchorValue(rotationAnchor)
+  });
+  const mergedMembers = mergeMemberAccountsWithLocalRecords(
+    Array.isArray(result?.memberUsernames)
+      ? result.memberUsernames.map((member) => cleanText(member)).filter(Boolean)
+      : state.memberAccounts
+  );
+
+  const nextMeta = {
+    rotationNames: sanitizeRotationNames(result?.rotationNames),
+    rotationAnchor: normalizeRotationAnchorValue(result?.rotationAnchor),
+    memberLoginRequired: Boolean(result?.memberLoginRequired) || mergedMembers.memberAccounts.length > 0,
+    memberAccounts: mergedMembers.memberAccounts,
+    memberRecords: mergedMembers.memberRecords
+  };
+
+  writeAppMetaCache(nextMeta);
+  applyAppMeta(nextMeta);
+}
+
+async function fetchCloudMembers() {
+  const result = await requestCloudApi("listMembers");
+  const nextMembers = Array.isArray(result?.members)
+    ? result.members.map((member) => cleanText(member?.username)).filter(Boolean)
+    : [];
+  const mergedMembers = mergeMemberAccountsWithLocalRecords(nextMembers);
+
+  const nextMeta = {
+    rotationNames: state.rotationNames,
+    rotationAnchor: state.rotationAnchor,
+    memberLoginRequired: mergedMembers.memberAccounts.length > 0,
+    memberAccounts: mergedMembers.memberAccounts,
+    memberRecords: mergedMembers.memberRecords
+  };
+
+  writeAppMetaCache(nextMeta);
+  applyAppMeta(nextMeta);
+  return mergedMembers.memberAccounts;
+}
+
+async function saveMemberToCloud(username, password) {
+  saveMemberLocally(username, password);
+
+  try {
+    const result = await requestCloudApi("saveMember", {
+      username: cleanText(username),
+      passwordHash: simpleHash(password)
+    });
+
+    const nextMembers = Array.isArray(result?.members)
+      ? result.members.map((member) => cleanText(member?.username)).filter(Boolean)
+      : state.memberAccounts;
+    const mergedMembers = mergeMemberAccountsWithLocalRecords(nextMembers);
+
+    const nextMeta = {
+      rotationNames: state.rotationNames,
+      rotationAnchor: state.rotationAnchor,
+      memberLoginRequired: mergedMembers.memberAccounts.length > 0,
+      memberAccounts: mergedMembers.memberAccounts,
+      memberRecords: mergedMembers.memberRecords
+    };
+
+    writeAppMetaCache(nextMeta);
+    applyAppMeta(nextMeta);
+    return {
+      savedInCloud: true
+    };
+  } catch (error) {
+    console.warn("Nao consegui salvar o acesso do membro na nuvem. Mantendo salvo neste aparelho.", error);
+    return {
+      savedInCloud: false
+    };
+  }
+}
+
+async function deleteMemberFromCloud(username) {
+  deleteMemberLocally(username);
+
+  try {
+    const result = await requestCloudApi("deleteMember", {
+      username: cleanText(username)
+    });
+
+    const nextMembers = Array.isArray(result?.members)
+      ? result.members.map((member) => cleanText(member?.username)).filter(Boolean)
+      : state.memberAccounts.filter((member) => normalizeSearch(member) !== normalizeSearch(username));
+    const mergedMembers = mergeMemberAccountsWithLocalRecords(nextMembers);
+
+    const nextMeta = {
+      rotationNames: state.rotationNames,
+      rotationAnchor: state.rotationAnchor,
+      memberLoginRequired: mergedMembers.memberAccounts.length > 0,
+      memberAccounts: mergedMembers.memberAccounts,
+      memberRecords: mergedMembers.memberRecords
+    };
+
+    writeAppMetaCache(nextMeta);
+    applyAppMeta(nextMeta);
+    return {
+      removedFromCloud: true
+    };
+  } catch (error) {
+    console.warn("Nao consegui remover o acesso do membro na nuvem. Mantendo a exclusao local.", error);
+    return {
+      removedFromCloud: false
+    };
+  }
+}
+
+async function signInMemberCloud(username, password) {
+  const result = await requestCloudApi("memberLogin", {
+    username: cleanText(username),
+    passwordHash: simpleHash(password)
+  }, {
+    includeAdminKey: false
+  });
+  const normalizedUsername = cleanText(result?.username || username);
+
+  state.currentMemberUsername = normalizedUsername;
+  state.currentAccessRole = "member";
+  state.cloudAdminKey = "";
+  state.adminLoggedIn = false;
+  state.memberLoggedIn = true;
+  writeCloudAdminKey("");
+  writeAccessSession("member", normalizedUsername);
+  writeMemberSession(normalizedUsername);
 }
 
 async function uploadCoverToCloud(songId, producer, coverUrl) {
@@ -1700,22 +1912,38 @@ async function deleteCloudSongVariants(songLike, rawCloudCatalog = [], keepSongI
   }
 }
 
-async function signInCloudAdmin(adminKey) {
+async function signInCloudAdmin(username, adminKey) {
   await requestCloudApi("login", {
+    username: cleanText(username),
     adminKey: cleanText(adminKey)
   }, {
     includeAdminKey: false
   });
 
+  state.currentMemberUsername = cleanText(username);
+  state.currentAccessRole = "admin";
+  state.memberLoggedIn = false;
   state.cloudAdminKey = cleanText(adminKey);
   writeCloudAdminKey(state.cloudAdminKey);
+  writeAccessSession("admin", state.currentMemberUsername || "admin");
   setAdminSessionFromCloud(state.cloudAdminKey);
 }
 
 async function signOutCloudAdmin() {
+  state.currentAccessRole = "guest";
+  state.currentMemberUsername = "";
   state.cloudAdminKey = "";
   writeCloudAdminKey("");
+  writeAccessSession("", "");
   state.adminLoggedIn = false;
+}
+
+function signOutMember() {
+  state.currentMemberUsername = "";
+  state.currentAccessRole = "guest";
+  state.memberLoggedIn = false;
+  writeAccessSession("", "");
+  writeMemberSession("");
 }
 
 async function migrateLocalCatalogToCloud() {
@@ -2299,6 +2527,73 @@ function formatDate(value) {
   }
 }
 
+function getWeekStartDate(date = new Date()) {
+  const current = new Date(date);
+  current.setHours(0, 0, 0, 0);
+
+  const day = current.getDay();
+  const diffToMonday = day === 0 ? -6 : 1 - day;
+  current.setDate(current.getDate() + diffToMonday);
+
+  return current;
+}
+
+function formatWeekRangeLabel(startDate) {
+  const start = new Date(startDate);
+  start.setHours(0, 0, 0, 0);
+
+  const end = new Date(start);
+  end.setDate(end.getDate() + 6);
+
+  const startMonth = start.toLocaleDateString("pt-BR", {
+    month: "short"
+  }).replace(".", "");
+  const endMonth = end.toLocaleDateString("pt-BR", {
+    month: "short"
+  }).replace(".", "");
+
+  if (startMonth === endMonth) {
+    return `${start.getDate()} - ${end.getDate()} ${endMonth}`;
+  }
+
+  return `${start.getDate()} ${startMonth} - ${end.getDate()} ${endMonth}`;
+}
+
+function getWeeklySelectorInfo(date = new Date()) {
+  const weekStart = getWeekStartDate(date);
+  const rotationNames = sanitizeRotationNames(state.rotationNames);
+  const [anchorYear, anchorMonth, anchorDay] = normalizeRotationAnchorValue(state.rotationAnchor)
+    .split("-")
+    .map((value) => Number(value));
+  const anchorDate = new Date(anchorYear, anchorMonth - 1, anchorDay);
+  anchorDate.setHours(0, 0, 0, 0);
+
+  const millisecondsPerWeek = 1000 * 60 * 60 * 24 * 7;
+  const weekOffset = Math.floor((weekStart.getTime() - anchorDate.getTime()) / millisecondsPerWeek);
+  const normalizedIndex =
+    ((weekOffset % rotationNames.length) + rotationNames.length) %
+    rotationNames.length;
+
+  return {
+    name: rotationNames[normalizedIndex],
+    weekLabel: formatWeekRangeLabel(weekStart)
+  };
+}
+
+function getAccessGreetingByTime(date = new Date()) {
+  const hours = new Date(date).getHours();
+
+  if (hours < 12) {
+    return "Bom dia";
+  }
+
+  if (hours < 18) {
+    return "Boa tarde";
+  }
+
+  return "Boa noite";
+}
+
 function compareText(a, b) {
   return cleanText(a).localeCompare(cleanText(b), "pt-BR", {
     sensitivity: "base"
@@ -2412,6 +2707,265 @@ function writeJson(key, value) {
   }
 }
 
+function getDefaultRotationAnchorValue() {
+  return `${WEEKLY_SELECTOR_ANCHOR.year}-${String(WEEKLY_SELECTOR_ANCHOR.month).padStart(2, "0")}-${String(WEEKLY_SELECTOR_ANCHOR.day).padStart(2, "0")}`;
+}
+
+function sanitizeRotationNames(input) {
+  const source = Array.isArray(input)
+    ? input
+    : String(input || "").split(/\r?\n|,/);
+  const uniqueNames = [];
+  const seenNames = new Set();
+
+  for (const value of source) {
+    const normalizedName = cleanText(value);
+    const searchKey = normalizeSearch(normalizedName);
+
+    if (!normalizedName || seenNames.has(searchKey)) {
+      continue;
+    }
+
+    seenNames.add(searchKey);
+    uniqueNames.push(normalizedName);
+  }
+
+  return uniqueNames.length ? uniqueNames : [...WEEKLY_SELECTOR_ROTATION];
+}
+
+function normalizeRotationAnchorValue(value) {
+  const normalizedValue = cleanText(value);
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(normalizedValue)) {
+    return normalizedValue;
+  }
+
+  return getDefaultRotationAnchorValue();
+}
+
+function sanitizeMemberRecords(input) {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  const records = [];
+  const seen = new Set();
+
+  for (const entry of input) {
+    const username = cleanText(entry?.username);
+    const passwordHash = cleanText(entry?.passwordHash);
+    const usernameKey = normalizeSearch(username);
+
+    if (!username || !passwordHash || !usernameKey || seen.has(usernameKey)) {
+      continue;
+    }
+
+    seen.add(usernameKey);
+    records.push({
+      username,
+      passwordHash
+    });
+  }
+
+  return records;
+}
+
+function readAppMetaCache() {
+  const cachedMeta = readJson(STORAGE_KEYS.appMeta, {});
+  const memberRecords = sanitizeMemberRecords(cachedMeta.memberRecords);
+  const memberAccounts = Array.isArray(cachedMeta.memberAccounts)
+    ? cachedMeta.memberAccounts.map((member) => cleanText(member)).filter(Boolean)
+    : memberRecords.map((member) => member.username);
+
+  return {
+    rotationNames: sanitizeRotationNames(cachedMeta.rotationNames),
+    rotationAnchor: normalizeRotationAnchorValue(cachedMeta.rotationAnchor),
+    memberLoginRequired: Boolean(cachedMeta.memberLoginRequired),
+    memberAccounts,
+    memberRecords
+  };
+}
+
+function writeAppMetaCache(meta = {}) {
+  const memberRecords = sanitizeMemberRecords(meta.memberRecords);
+  const memberAccounts = Array.isArray(meta.memberAccounts)
+    ? meta.memberAccounts.map((member) => cleanText(member)).filter(Boolean)
+    : memberRecords.map((member) => member.username);
+
+  return writeJson(STORAGE_KEYS.appMeta, {
+    rotationNames: sanitizeRotationNames(meta.rotationNames),
+    rotationAnchor: normalizeRotationAnchorValue(meta.rotationAnchor),
+    memberLoginRequired: Boolean(meta.memberLoginRequired),
+    memberAccounts,
+    memberRecords
+  });
+}
+
+function readMemberSession() {
+  try {
+    return cleanText(localStorage.getItem(STORAGE_KEYS.memberSession));
+  } catch (error) {
+    console.error("Falha ao ler sessao do membro.", error);
+    return "";
+  }
+}
+
+function writeMemberSession(username = "") {
+  const normalizedUsername = cleanText(username);
+
+  try {
+    if (normalizedUsername) {
+      localStorage.setItem(STORAGE_KEYS.memberSession, normalizedUsername);
+      return;
+    }
+
+    localStorage.removeItem(STORAGE_KEYS.memberSession);
+  } catch (error) {
+    console.error("Falha ao salvar sessao do membro.", error);
+  }
+}
+
+function readAccessSession() {
+  const session = readJson(STORAGE_KEYS.accessSession, null);
+
+  if (!session || !cleanText(session.role)) {
+    return {
+      role: "guest",
+      username: ""
+    };
+  }
+
+  return {
+    role: cleanText(session.role),
+    username: cleanText(session.username)
+  };
+}
+
+function writeAccessSession(role = "", username = "") {
+  const normalizedRole = cleanText(role);
+  const normalizedUsername = cleanText(username);
+
+  if (!normalizedRole || !normalizedUsername) {
+    writeJson(STORAGE_KEYS.accessSession, null);
+    return;
+  }
+
+  writeJson(STORAGE_KEYS.accessSession, {
+    role: normalizedRole,
+    username: normalizedUsername
+  });
+}
+
+function isAdminUser() {
+  return state.adminLoggedIn;
+}
+
+function isMemberUser() {
+  return !state.adminLoggedIn && state.memberLoggedIn;
+}
+
+function hasAccessSession() {
+  return isAdminUser() || isMemberUser();
+}
+
+function requiresAppLogin() {
+  return isGoogleSheetsConfigured() || hasAdminConfig() || state.memberAccounts.length > 0 || state.memberRecords.length > 0;
+}
+
+function mergeMemberAccountsWithLocalRecords(memberAccounts = []) {
+  const usernames = Array.isArray(memberAccounts)
+    ? memberAccounts.map((member) => cleanText(member)).filter(Boolean)
+    : [];
+  const nextRecords = [...state.memberRecords];
+  const seenUsernames = new Set(nextRecords.map((record) => normalizeSearch(record.username)).filter(Boolean));
+  const mergedAccounts = [...usernames];
+
+  for (const record of state.memberRecords) {
+    const recordKey = normalizeSearch(record.username);
+    if (!recordKey || seenUsernames.has(recordKey)) {
+      continue;
+    }
+
+    seenUsernames.add(recordKey);
+    nextRecords.push(record);
+  }
+
+  for (const record of nextRecords) {
+    const recordKey = normalizeSearch(record.username);
+    const alreadyListed = mergedAccounts.some((username) => normalizeSearch(username) === recordKey);
+
+    if (!alreadyListed) {
+      mergedAccounts.push(record.username);
+    }
+  }
+
+  return {
+    memberAccounts: mergedAccounts,
+    memberRecords: nextRecords
+  };
+}
+
+function saveMemberLocally(username, password) {
+  const normalizedUsername = cleanText(username);
+  const passwordHash = simpleHash(password);
+  const nextRecords = state.memberRecords
+    .filter((record) => normalizeSearch(record.username) !== normalizeSearch(normalizedUsername));
+
+  nextRecords.push({
+    username: normalizedUsername,
+    passwordHash
+  });
+
+  const nextMeta = {
+    rotationNames: state.rotationNames,
+    rotationAnchor: state.rotationAnchor,
+    memberLoginRequired: nextRecords.length > 0,
+    memberAccounts: nextRecords.map((record) => record.username),
+    memberRecords: nextRecords
+  };
+
+  writeAppMetaCache(nextMeta);
+  applyAppMeta(nextMeta);
+}
+
+function deleteMemberLocally(username) {
+  const normalizedUsername = cleanText(username);
+  const nextRecords = state.memberRecords.filter((record) => normalizeSearch(record.username) !== normalizeSearch(normalizedUsername));
+  const nextAccounts = state.memberAccounts.filter((member) => normalizeSearch(member) !== normalizeSearch(normalizedUsername));
+  const nextMeta = {
+    rotationNames: state.rotationNames,
+    rotationAnchor: state.rotationAnchor,
+    memberLoginRequired: nextRecords.length > 0 || nextAccounts.length > 0,
+    memberAccounts: nextAccounts,
+    memberRecords: nextRecords
+  };
+
+  writeAppMetaCache(nextMeta);
+  applyAppMeta(nextMeta);
+}
+
+function signInMemberLocal(username, password) {
+  const normalizedUsername = cleanText(username);
+  const passwordHash = simpleHash(password);
+  const matchingMember = state.memberRecords.find((record) => {
+    return normalizeSearch(record.username) === normalizeSearch(normalizedUsername)
+      && record.passwordHash === passwordHash;
+  });
+
+  if (!matchingMember) {
+    throw new Error("Usuario ou senha do membro incorretos.");
+  }
+
+  state.currentMemberUsername = matchingMember.username;
+  state.currentAccessRole = "member";
+  state.cloudAdminKey = "";
+  state.adminLoggedIn = false;
+  state.memberLoggedIn = true;
+  writeCloudAdminKey("");
+  writeAccessSession("member", matchingMember.username);
+  writeMemberSession(matchingMember.username);
+}
+
 function getAdminConfig() {
   const config = readJson(STORAGE_KEYS.adminConfig, null);
 
@@ -2435,6 +2989,44 @@ function setAdminSession(isLoggedIn) {
   }
 
   sessionStorage.removeItem(STORAGE_KEYS.adminSession);
+}
+
+function applyAppMeta(meta = {}) {
+  state.rotationNames = sanitizeRotationNames(meta.rotationNames);
+  state.rotationAnchor = normalizeRotationAnchorValue(meta.rotationAnchor);
+  state.memberRecords = sanitizeMemberRecords(meta.memberRecords);
+  state.memberAccounts = Array.isArray(meta.memberAccounts) && meta.memberAccounts.length
+    ? meta.memberAccounts.map((member) => cleanText(member)).filter(Boolean)
+    : state.memberRecords.map((member) => member.username);
+  state.memberLoginRequired = Boolean(meta.memberLoginRequired) && (state.memberAccounts.length > 0 || state.memberRecords.length > 0);
+
+  const currentMemberUsername = cleanText(state.currentMemberUsername);
+  const memberExists = state.memberAccounts.some((member) => normalizeSearch(member) === normalizeSearch(currentMemberUsername))
+    || state.memberRecords.some((member) => normalizeSearch(member.username) === normalizeSearch(currentMemberUsername));
+
+  if (!state.memberLoginRequired && state.currentAccessRole !== "admin") {
+    state.currentMemberUsername = "";
+    state.currentAccessRole = state.adminLoggedIn ? "admin" : "guest";
+    state.memberLoggedIn = false;
+    writeMemberSession("");
+    return;
+  }
+
+  if (currentMemberUsername && memberExists) {
+    if (state.currentAccessRole !== "admin") {
+      state.currentAccessRole = "member";
+      state.memberLoggedIn = true;
+    }
+    return;
+  }
+
+  if (state.currentAccessRole !== "admin") {
+    state.currentMemberUsername = "";
+    state.currentAccessRole = "guest";
+    state.memberLoggedIn = false;
+    writeMemberSession("");
+    writeAccessSession("", "");
+  }
 }
 
 function createSongRecord(input) {
@@ -2495,12 +3087,13 @@ function buildSeedCatalog() {
 
 async function loadCatalog() {
   const fallbackCatalog = loadLocalCatalogSnapshot();
+  const cachedMeta = readAppMetaCache();
   state.catalog = fallbackCatalog;
   saveLocalCatalogBackupSnapshot(fallbackCatalog);
+  applyAppMeta(cachedMeta);
 
   if (!isGoogleSheetsConfigured()) {
     state.syncMode = "local";
-    state.adminLoggedIn = true;
     saveCatalogSnapshot();
     return;
   }
@@ -2508,13 +3101,13 @@ async function loadCatalog() {
   if (!hasGoogleSheetsSupport()) {
     console.warn("Este navegador nao conseguiu usar a integracao com Google Sheets. Mantendo modo local.");
     state.syncMode = "local";
-    state.adminLoggedIn = true;
     saveCatalogSnapshot();
     return;
   }
 
   try {
     await refreshCloudAdminState();
+    applyAppMeta(await fetchCloudAppMeta());
     const cloudCatalog = await fetchCloudCatalog();
     state.catalog = cloudCatalog.length ? cloudCatalog : fallbackCatalog;
     saveCatalogSnapshot();
@@ -2522,8 +3115,8 @@ async function loadCatalog() {
   } catch (error) {
     console.error("Falha ao carregar catalogo remoto.", error);
     state.syncMode = "local";
-    state.adminLoggedIn = true;
     state.catalog = fallbackCatalog;
+    applyAppMeta(cachedMeta);
   }
 }
 
@@ -2546,6 +3139,8 @@ function loadPreferences() {
       ? "alagoa"
       : "elite";
   state.selectedSongId = null;
+  state.weeklySelectedSongIds = sanitizeSongIdList(stored.weeklySelectedSongIds);
+  syncWeeklySelectedSongs();
 }
 
 function savePreferences() {
@@ -2553,26 +3148,44 @@ function savePreferences() {
     query: state.query,
     favoritesOnly: state.favoritesOnly,
     favorites: [...state.favorites],
-    activeProducer: state.activeProducer
+    activeProducer: state.activeProducer,
+    weeklySelectedSongIds: sanitizeSongIdList(state.weeklySelectedSongIds)
   });
 }
 
 function loadAdminState() {
+  const cachedMeta = readAppMetaCache();
+  const accessSession = readAccessSession();
   state.deletedCatalogKeys = new Set(readDeletedCatalogKeys());
   state.cloudAdminKey = readCloudAdminKey();
-  state.adminLoggedIn = !isGoogleSheetsConfigured() || Boolean(state.cloudAdminKey);
   state.syncMode = isGoogleSheetsConfigured() ? "cloud" : "local";
+  state.currentMemberUsername = cleanText(accessSession.username) || readMemberSession();
+  state.currentAccessRole = accessSession.role === "admin" || accessSession.role === "member" ? accessSession.role : "guest";
+  state.adminLoggedIn = state.currentAccessRole === "admin" && (!isGoogleSheetsConfigured() || Boolean(state.cloudAdminKey));
+  state.memberLoggedIn = state.currentAccessRole === "member";
+  applyAppMeta(cachedMeta);
 }
 
 function setAdminModalMode(mode = "create") {
-  state.adminModalMode = mode === "assets" ? "assets" : "create";
+  state.adminModalMode = ["assets", "users"].includes(mode) ? mode : "create";
 }
 
 function isAdminAssetsMode() {
   return state.adminModalMode === "assets";
 }
 
+function isAdminUsersMode() {
+  return state.adminModalMode === "users";
+}
+
 function getAdminModalCopy() {
+  if (isAdminUsersMode()) {
+    return {
+      eyebrow: "Usuarios",
+      title: "Cadastrar usuario"
+    };
+  }
+
   if (isAdminAssetsMode()) {
     return {
       eyebrow: "Atualizacao",
@@ -2597,6 +3210,10 @@ function setAdminProducerFilter(producer) {
 function buildAdminModalActionsMarkup() {
   const migrationSourceCount = getMigrationSourceCatalog().length;
   const actions = [];
+
+  if (isAdminUsersMode() || !isAdminAssetsMode()) {
+    return "";
+  }
 
   if (isAdminAssetsMode() && (!isCloudModeActive() || state.adminLoggedIn) && getSongsByProducer(getAdminProducerFilter()).length) {
     actions.push(`
@@ -2716,6 +3333,66 @@ function toggleFavorite(songId) {
   renderAll();
 }
 
+function syncWeeklySelectedSongs() {
+  const validSongIds = new Set(state.catalog.map((song) => cleanText(song.id)).filter(Boolean));
+  const nextWeeklySelectedIds = sanitizeSongIdList(state.weeklySelectedSongIds)
+    .filter((songId) => validSongIds.has(songId));
+
+  state.weeklySelectedSongIds = nextWeeklySelectedIds;
+}
+
+function getWeeklySelectedSongs() {
+  const songsById = new Map(state.catalog.map((song) => [cleanText(song.id), song]));
+
+  return sanitizeSongIdList(state.weeklySelectedSongIds)
+    .map((songId) => songsById.get(songId))
+    .filter(Boolean);
+}
+
+function isWeeklySelected(songId) {
+  const normalizedSongId = cleanText(songId);
+  return state.weeklySelectedSongIds.includes(normalizedSongId);
+}
+
+function removeSongFromWeeklySelections(songId) {
+  const normalizedSongId = cleanText(songId);
+
+  if (!normalizedSongId) {
+    return;
+  }
+
+  state.weeklySelectedSongIds = state.weeklySelectedSongIds.filter((currentSongId) => currentSongId !== normalizedSongId);
+  renderAll();
+  setFlash("Musica removida das selecionadas da semana.", "success");
+}
+
+function addSongToWeeklySelections(songId) {
+  const normalizedSongId = cleanText(songId);
+  const song = state.catalog.find((item) => item.id === normalizedSongId);
+
+  if (!song) {
+    setFlash("Nao encontrei a musica para selecionar.", "error");
+    return;
+  }
+
+  if (!isWeeklySelected(normalizedSongId)) {
+    state.weeklySelectedSongIds = [...state.weeklySelectedSongIds, normalizedSongId];
+  }
+
+  state.lyricsMinistryMode = false;
+  state.selectedSongId = null;
+  renderAll();
+
+  if (elements.weeklySelectionsPanel && !elements.weeklySelectionsPanel.hidden) {
+    elements.weeklySelectionsPanel.scrollIntoView({
+      behavior: "smooth",
+      block: "start"
+    });
+  }
+
+  setFlash(`"${song.title}" foi para Musicas selecionadas da semana.`, "success");
+}
+
 function ensureSelectedSong() {
   const visibleSongs = getVisibleSongs();
   const selectedIsVisible = visibleSongs.some((song) => song.id === state.selectedSongId);
@@ -2762,17 +3439,65 @@ function setFlash(message, type = "") {
 }
 
 function renderAdminFlash() {
-  elements.adminFlash.textContent = state.flashMessage;
-  elements.adminFlash.className = "admin-flash";
+  const flashTargets = [elements.adminFlash, elements.memberLoginFlash].filter(Boolean);
 
-  if (state.flashType) {
-    elements.adminFlash.classList.add(`is-${state.flashType}`);
+  for (const target of flashTargets) {
+    target.textContent = state.flashMessage;
+    target.className = "admin-flash";
+
+    if (state.flashType) {
+      target.classList.add(`is-${state.flashType}`);
+    }
+  }
+}
+
+function renderAccessControls() {
+  const adminButtonsVisible = state.currentAccessRole === "admin" && isAdminUser();
+  const sessionVisible = hasAccessSession();
+
+  if (elements.openAdminButton) {
+    elements.openAdminButton.hidden = !adminButtonsVisible;
+    elements.openAdminButton.style.display = adminButtonsVisible ? "" : "none";
+  }
+
+  if (elements.openAssetsButton) {
+    elements.openAssetsButton.hidden = !adminButtonsVisible;
+    elements.openAssetsButton.style.display = adminButtonsVisible ? "" : "none";
+  }
+
+  if (elements.openUsersButton) {
+    elements.openUsersButton.hidden = !adminButtonsVisible;
+    elements.openUsersButton.style.display = adminButtonsVisible ? "" : "none";
+  }
+
+  if (elements.memberLogoutButton) {
+    elements.memberLogoutButton.hidden = !sessionVisible;
+
+    if (sessionVisible) {
+      const roleLabel = isAdminUser() ? "admin" : "membro";
+      elements.memberLogoutButton.textContent = `Sair (${roleLabel}: ${state.currentMemberUsername || roleLabel})`;
+    }
+  }
+}
+
+function renderMemberLoginOverlay() {
+  if (!elements.memberLoginOverlay) {
+    return;
+  }
+
+  const shouldShowOverlay = requiresAppLogin() && !hasAccessSession();
+  elements.memberLoginOverlay.classList.toggle("is-hidden", !shouldShowOverlay);
+  elements.memberLoginOverlay.setAttribute("aria-hidden", shouldShowOverlay ? "false" : "true");
+
+  if (!shouldShowOverlay && elements.memberLoginForm) {
+    elements.memberLoginForm.reset();
   }
 }
 
 function renderHeroStats() {
   const eliteSummary = getProducerSummary("elite");
   const alagoaSummary = getProducerSummary("alagoa");
+  const weeklySelector = getWeeklySelectorInfo();
 
   elements.heroStats.innerHTML = `
     <article class="stat-card">
@@ -2790,6 +3515,114 @@ function renderHeroStats() {
       <strong>${state.catalog.length}</strong>
       <span class="muted-copy">Todas as musicas disponiveis neste navegador</span>
     </article>
+    <article class="stat-card stat-card-centered">
+      <span class="eyebrow">Escala da semana</span>
+      <strong>${escapeHtml(weeklySelector.name)}</strong>
+    </article>
+  `;
+}
+
+function getRecentAddedSongs(limit = 8) {
+  return [...state.catalog]
+    .filter((song) => !cleanText(song.id).startsWith("seed-"))
+    .sort((leftSong, rightSong) => {
+      const leftTime = new Date(leftSong.createdAt || leftSong.updatedAt || 0).getTime();
+      const rightTime = new Date(rightSong.createdAt || rightSong.updatedAt || 0).getTime();
+      return rightTime - leftTime;
+    })
+    .slice(0, limit);
+}
+
+function renderRecentAdditionsPanel() {
+  if (!elements.recentAdditionsPanel) {
+    return;
+  }
+
+  const recentSongs = getRecentAddedSongs(8);
+  elements.recentAdditionsPanel.hidden = false;
+
+  elements.recentAdditionsPanel.innerHTML = `
+    <div class="recent-additions-head">
+      <div>
+        <p class="eyebrow">Novas musicas adicionadas</p>
+      </div>
+    </div>
+    <div class="recent-additions-list">
+      ${recentSongs.map((song) => {
+        const hasCover = Boolean(resolveSongCoverUrl(song));
+        const openMarkup = hasCover
+          ? `<button class="recent-song-open" type="button" data-recent-song-id="${escapeHtml(song.id)}" aria-label="Abrir ${escapeHtml(song.title)}">
+               ${renderArtworkMarkup(song, "recent")}
+             </button>`
+          : `<div class="recent-song-open is-disabled" aria-disabled="true">
+               ${renderArtworkMarkup(song, "recent")}
+             </div>`;
+        const deleteMarkup = isAdminUser()
+          ? `<button class="danger-button recent-song-delete" type="button" data-delete-song="${escapeHtml(song.id)}">Excluir</button>`
+          : "";
+
+        return `
+          <article class="recent-song-card ${hasCover ? "" : "is-disabled"}">
+            ${openMarkup}
+            ${deleteMarkup}
+          </article>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function openRecentSong(songId) {
+  const song = state.catalog.find((item) => item.id === cleanText(songId));
+
+  if (!song) {
+    setFlash("Nao encontrei a musica para abrir.", "error");
+    return;
+  }
+
+  state.activeProducer = song.producer === "alagoa" ? "alagoa" : "elite";
+  state.selectedSongId = song.id;
+  renderAll();
+}
+
+function renderWeeklySelectionsPanel() {
+  if (!elements.weeklySelectionsPanel) {
+    return;
+  }
+
+  const selectedSongs = getWeeklySelectedSongs();
+  elements.weeklySelectionsPanel.hidden = selectedSongs.length === 0;
+
+  if (!selectedSongs.length) {
+    elements.weeklySelectionsPanel.innerHTML = "";
+    return;
+  }
+
+  elements.weeklySelectionsPanel.innerHTML = `
+    <div class="weekly-selections-head">
+      <div>
+        <p class="eyebrow">Semana</p>
+        <h3>Musicas selecionadas da semana</h3>
+      </div>
+    </div>
+
+    <div class="weekly-selections-list">
+      ${selectedSongs.map((song) => `
+        <article class="weekly-selection-card">
+          <button class="weekly-selection-open" type="button" data-weekly-song-id="${escapeHtml(song.id)}">
+            ${renderArtworkMarkup(song, "recent")}
+            <div class="weekly-selection-copy">
+              <strong>${escapeHtml(song.title)}</strong>
+              <span>${escapeHtml(song.artist)}</span>
+            </div>
+          </button>
+
+          <button class="danger-button weekly-selection-remove" type="button" data-remove-weekly-song="${escapeHtml(song.id)}">
+            Remover
+          </button>
+        </article>
+      `).join("")}
+    </div>
   `;
 }
 
@@ -2805,12 +3638,16 @@ function renderTabs() {
 
 function renderScreenBanner() {
   const producer = PRODUCERS[state.activeProducer];
+  const memberWelcomeMessage = isMemberUser() && cleanText(state.currentMemberUsername)
+    ? `<p class="banner-welcome">${escapeHtml(getAccessGreetingByTime())}, ${escapeHtml(state.currentMemberUsername)}. Deus te aben&ccedil;oe.</p>`
+    : "";
 
   elements.screenBanner.style.setProperty("--banner-accent", producer.accent);
   elements.screenBanner.innerHTML = `
     <div class="banner-layout">
       <div>
         <h3>${escapeHtml(producer.name)}</h3>
+        ${memberWelcomeMessage}
       </div>
     </div>
   `;
@@ -2951,6 +3788,7 @@ function renderSongViewer() {
   const youtubeLink = cleanText(song.youtubeUrl);
   const hasYoutubeLink = Boolean(youtubeLink);
   const favorite = isFavorite(song.id);
+  const weeklySelected = isWeeklySelected(song.id);
   const producerName = formatProducerName(song.producer);
   const lyricsMarkup = formatLyricsMarkup(song.lyrics);
   const ministryMode = state.lyricsMinistryMode;
@@ -3012,6 +3850,13 @@ function renderSongViewer() {
             ${hasYoutubeLink ? "" : "disabled"}
           >
             Compartilhar
+          </button>
+          <button
+            class="secondary-button ${weeklySelected ? "is-active" : ""}"
+            type="button"
+            data-select-weekly-song="${escapeHtml(song.id)}"
+          >
+            ${weeklySelected ? "Ir para selecionadas da semana" : "Selecionar da semana"}
           </button>
         </div>
       </div>
@@ -3219,8 +4064,13 @@ function renderAdminLoginGate() {
 
           <form id="cloud-admin-login-form" class="admin-form-grid">
             <div class="field-block full">
-              <label for="cloud-admin-key">Chave do administrador</label>
-              <input id="cloud-admin-key" class="admin-input" name="admin-key" type="password" autocomplete="current-password" placeholder="Sua chave do cadastro">
+              <label for="cloud-admin-username">Usuario do administrador</label>
+              <input id="cloud-admin-username" class="admin-input" name="admin-username" type="text" autocomplete="username" placeholder="Ex.: admin">
+            </div>
+
+            <div class="field-block full">
+              <label for="cloud-admin-key">Senha do administrador</label>
+              <input id="cloud-admin-key" class="admin-input" name="admin-password" type="password" autocomplete="current-password" placeholder="Sua senha admin">
             </div>
 
             <div class="field-block full inline-actions">
@@ -3263,9 +4113,93 @@ function buildCoverUploadFieldMarkup(previewCoverUrl, title, artist) {
   `;
 }
 
+function buildMemberAccountsListMarkup() {
+  if (!state.memberAccounts.length) {
+    return `
+      <div class="member-access-empty">
+        <strong>Nenhum membro cadastrado ainda.</strong>
+        <p>Quando voce criar o primeiro usuario, o app passa a pedir login para o pessoal acessar o acervo.</p>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="member-access-list">
+      ${state.memberAccounts.map((member) => `
+        <article class="member-access-item">
+          <div>
+            <strong>${escapeHtml(member)}</strong>
+            <span>Login ativo para acesso ao acervo</span>
+          </div>
+          <button class="danger-button" type="button" data-delete-member="${escapeHtml(member)}">Excluir</button>
+        </article>
+      `).join("")}
+    </div>
+  `;
+}
+
+function buildAccessSettingsMarkup() {
+  const authButton = buildAdminAuthButtonMarkup();
+
+  return `
+    <section class="admin-card admin-settings-card">
+      <div class="admin-card-head">
+        <div>
+          <p class="eyebrow">Escala e acessos</p>
+          <h4>Cadastrar usuario e ajustar a rotacao da semana</h4>
+        </div>
+        <div class="admin-head-actions">
+          <span class="badge">${state.memberAccounts.length} ${state.memberAccounts.length === 1 ? "usuario" : "usuarios"}</span>
+          ${authButton}
+        </div>
+      </div>
+
+      <div class="admin-settings-stack">
+        <form id="rotation-settings-form" class="admin-form-grid">
+          <div class="field-block full">
+            <label for="rotation-names">Rotacao da semana</label>
+            <textarea id="rotation-names" class="admin-textarea" name="rotation-names" placeholder="Um nome por linha">${escapeHtml(state.rotationNames.join("\n"))}</textarea>
+            <p class="helper-text">Use um nome por linha na ordem certa. O app vai repetir automaticamente a sequencia.</p>
+          </div>
+
+          <div class="field-block">
+            <label for="rotation-anchor">Semana inicial</label>
+            <input id="rotation-anchor" class="admin-input" name="rotation-anchor" type="date" value="${escapeHtml(normalizeRotationAnchorValue(state.rotationAnchor))}">
+          </div>
+
+          <div class="field-block admin-field-align-end">
+            <button class="action-button" type="submit">Salvar rotacao</button>
+          </div>
+        </form>
+
+        <div class="admin-settings-divider"></div>
+
+        <form id="member-access-form" class="admin-form-grid">
+          <div class="field-block">
+            <label for="member-access-username">Usuario do membro</label>
+            <input id="member-access-username" class="admin-input" name="member-username" type="text" placeholder="Usuario para entrar no app">
+          </div>
+
+          <div class="field-block">
+            <label for="member-access-password">Senha do membro</label>
+            <input id="member-access-password" class="admin-input" name="member-password" type="password" placeholder="Senha do membro">
+          </div>
+
+          <div class="field-block full inline-actions">
+            <button class="action-button" type="submit">Cadastrar usuario</button>
+          </div>
+        </form>
+
+        <p class="helper-text">Se quiser, voce pode usar um unico usuario e senha para todo o grupo de membros.</p>
+
+        ${buildMemberAccountsListMarkup()}
+      </div>
+    </section>
+  `;
+}
+
 function buildCreateSongFormMarkup() {
   const previewCoverUrl = getAdminCoverPreviewUrl();
-  const producerName = formatProducerName(state.activeProducer);
   const authButton = buildAdminAuthButtonMarkup();
 
   return `
@@ -3274,15 +4208,12 @@ function buildCreateSongFormMarkup() {
         <div class="admin-card-head">
           <div>
             <p class="eyebrow">Novo cadastro</p>
-            <h4>Cadastrar musica em ${escapeHtml(producerName)}</h4>
+            <h4>Novo cadastro</h4>
           </div>
           <div class="admin-head-actions">
-            <span class="badge">${escapeHtml(producerName)}</span>
             ${authButton}
           </div>
         </div>
-
-        <p class="helper-text admin-intro-copy">Preencha os campos abaixo e escolha se a musica entra no acervo do Elite ou do Alagoa.</p>
 
         <form id="admin-song-form" class="admin-form-grid admin-form-grid-clean">
           <input type="hidden" name="song-id" value="">
@@ -3396,6 +4327,14 @@ function renderAdminCreateView() {
   elements.adminDashboardView.innerHTML = buildCreateSongFormMarkup();
 }
 
+function renderAdminUsersView() {
+  elements.adminDashboardView.innerHTML = `
+    <div class="admin-shell admin-shell-users">
+      ${buildAccessSettingsMarkup()}
+    </div>
+  `;
+}
+
 function renderAdminAssetsView() {
   const editingSong = state.catalog.find((song) => song.id === state.editingSongId) || null;
   const filteredSongs = getFilteredAdminSongs();
@@ -3464,6 +4403,11 @@ function renderAdminDashboardView() {
     return;
   }
 
+  if (isAdminUsersMode()) {
+    renderAdminUsersView();
+    return;
+  }
+
   if (isAdminAssetsMode()) {
     renderAdminAssetsView();
     return;
@@ -3479,11 +4423,16 @@ function renderAdminViews() {
 }
 
 function renderAll() {
+  syncWeeklySelectedSongs();
   ensureSelectedSong();
   syncHash();
+  renderAccessControls();
+  renderMemberLoginOverlay();
   renderHeroStats();
   renderTabs();
   renderScreenBanner();
+  renderRecentAdditionsPanel();
+  renderWeeklySelectionsPanel();
   renderSongsPanel(getVisibleSongs());
   renderSongViewer();
   renderAdminViews();
@@ -3509,15 +4458,22 @@ async function openAdminModal(mode = "create") {
   setAdminProducerFilter(state.activeProducer);
   resetAdminCoverDraft();
 
-  if (isGoogleSheetsConfigured()) {
-    await refreshCloudAdminState();
-  }
-
   renderAdminViews();
   elements.adminModal.classList.remove("is-hidden");
   elements.adminModal.setAttribute("aria-hidden", "false");
   document.body.style.overflow = "hidden";
   focusAdminSongForm();
+
+  if (isGoogleSheetsConfigured()) {
+    try {
+      await refreshCloudAdminState();
+      applyAppMeta(await fetchCloudAppMeta());
+      renderAdminViews();
+      focusAdminSongForm();
+    } catch (error) {
+      console.warn("Nao consegui atualizar a escala e os acessos antes de abrir o painel.", error);
+    }
+  }
 }
 
 function closeAdminModal() {
@@ -3710,7 +4666,7 @@ async function saveSongFromForm(formData) {
       }
     }
 
-    state.selectedSongId = persistedSong.id;
+    state.selectedSongId = songId ? persistedSong.id : null;
     state.activeProducer = producer;
     state.editingSongId = songId && isAdminAssetsMode() ? persistedSong.id : null;
     resetAdminCoverDraft();
@@ -3810,20 +4766,198 @@ async function handleCloudAdminLoginSubmit(event) {
   event.preventDefault();
 
   const formData = new FormData(event.target);
-  const adminKey = cleanText(formData.get("admin-key"));
+  const username = cleanText(formData.get("admin-username")) || "admin";
+  const adminPassword = cleanText(formData.get("admin-password"));
 
-  if (!adminKey) {
-    setFlash("Preencha a chave do administrador.", "error");
+  if (!username || !adminPassword) {
+    setFlash("Preencha usuario e senha do administrador.", "error");
     return;
   }
 
   try {
-    await signInCloudAdmin(adminKey);
+    await signInCloudAdmin(username, adminPassword);
+    try {
+      await fetchCloudMembers();
+    } catch (membersError) {
+      console.warn("Nao consegui atualizar a lista de membros logo apos o login admin.", membersError);
+    }
     renderAll();
     setFlash("Login do administrador realizado com sucesso.", "success");
   } catch (error) {
     console.error("Falha no login do administrador.", error);
-    setFlash("Nao consegui entrar. Confira a chave admin e a configuracao do Google Sheets.", "error");
+    setFlash("Nao consegui entrar. Confira o usuario admin, a senha e a configuracao do Google Sheets.", "error");
+  }
+}
+
+async function handleAccessLoginSubmit(event) {
+  event.preventDefault();
+
+  const formData = new FormData(event.target);
+  const username = cleanText(formData.get("login-username"));
+  const password = cleanText(formData.get("login-password"));
+
+  if (!username || !password) {
+    setFlash("Preencha usuario e senha para entrar.", "error");
+    return;
+  }
+
+  try {
+    const localAdminConfig = getAdminConfig();
+
+    try {
+      if (isCloudModeActive()) {
+        await signInCloudAdmin(username, password);
+      } else if (localAdminConfig) {
+        const sameUser = normalizeSearch(localAdminConfig.username) === normalizeSearch(username);
+        const samePassword = localAdminConfig.passwordHash === simpleHash(password);
+
+        if (!sameUser || !samePassword) {
+          throw new Error("Usuario ou senha admin invalidos.");
+        }
+
+        state.currentMemberUsername = username;
+        state.currentAccessRole = "admin";
+        state.memberLoggedIn = false;
+        writeAccessSession("admin", username);
+        setAdminSession(true);
+      } else {
+        throw new Error("Administrador indisponivel.");
+      }
+
+      try {
+        await fetchCloudMembers();
+      } catch (membersError) {
+        console.warn("Nao consegui atualizar os membros logo apos o login admin.", membersError);
+      }
+
+      renderAll();
+      setFlash("Administrador conectado com sucesso.", "success");
+      return;
+    } catch (adminError) {
+      if (!state.memberAccounts.length && !state.memberRecords.length) {
+        throw adminError;
+      }
+
+      if (isCloudModeActive()) {
+        try {
+          await signInMemberCloud(username, password);
+        } catch (cloudMemberError) {
+          signInMemberLocal(username, password);
+        }
+      } else {
+        signInMemberLocal(username, password);
+      }
+
+      renderAll();
+      setFlash(`Acesso liberado para ${state.currentMemberUsername}.`, "success");
+    }
+  } catch (error) {
+    console.error("Falha no login do app.", error);
+    setFlash("Nao consegui entrar. Confira usuario e senha.", "error");
+  }
+}
+
+async function handleRotationSettingsSubmit(event) {
+  event.preventDefault();
+
+  const formData = new FormData(event.target);
+  const rotationNames = sanitizeRotationNames(formData.get("rotation-names"));
+  const rotationAnchor = normalizeRotationAnchorValue(formData.get("rotation-anchor"));
+
+  try {
+    if (isCloudModeActive()) {
+      if (!state.adminLoggedIn) {
+        setFlash("Entre como administrador para editar a rotacao.", "error");
+        return;
+      }
+
+      await saveRotationSettingsToCloud(rotationNames, rotationAnchor);
+    } else {
+      const nextMeta = {
+        rotationNames,
+        rotationAnchor,
+        memberLoginRequired: state.memberLoginRequired,
+        memberAccounts: state.memberAccounts,
+        memberRecords: state.memberRecords
+      };
+      writeAppMetaCache(nextMeta);
+      applyAppMeta(nextMeta);
+    }
+
+    renderAll();
+    setFlash("Rotacao semanal atualizada com sucesso.", "success");
+  } catch (error) {
+    console.error("Falha ao salvar rotacao semanal.", error);
+    setFlash("Nao consegui salvar a rotacao agora.", "error");
+  }
+}
+
+async function handleMemberAccessSubmit(event) {
+  event.preventDefault();
+
+  const formData = new FormData(event.target);
+  const username = cleanText(formData.get("member-username"));
+  const password = cleanText(formData.get("member-password"));
+
+  if (!username || !password) {
+    setFlash("Preencha usuario e senha para criar o acesso do membro.", "error");
+    return;
+  }
+
+  if (!state.adminLoggedIn) {
+    setFlash("Entre como administrador antes de cadastrar acessos de membro.", "error");
+    return;
+  }
+
+  try {
+    const result = isCloudModeActive()
+      ? await saveMemberToCloud(username, password)
+      : (saveMemberLocally(username, password), { savedInCloud: false });
+    event.target.reset();
+    renderAll();
+    setFlash(
+      result?.savedInCloud === false
+        ? `Usuario ${username} salvo neste aparelho.`
+        : `Acesso do membro ${username} salvo com sucesso.`,
+      "success"
+    );
+  } catch (error) {
+    console.error("Falha ao salvar acesso de membro.", error);
+    setFlash("Nao consegui salvar esse acesso de membro.", "error");
+  }
+}
+
+async function handleDeleteMember(username) {
+  const normalizedUsername = cleanText(username);
+
+  if (!normalizedUsername) {
+    setFlash("Nao encontrei o membro para excluir.", "error");
+    return;
+  }
+
+  if (!window.confirm(`Deseja excluir o acesso de ${normalizedUsername}?`)) {
+    return;
+  }
+
+  try {
+    const result = isCloudModeActive()
+      ? await deleteMemberFromCloud(normalizedUsername)
+      : (deleteMemberLocally(normalizedUsername), { removedFromCloud: false });
+
+    if (normalizeSearch(state.currentMemberUsername) === normalizeSearch(normalizedUsername)) {
+      signOutMember();
+    }
+
+    renderAll();
+    setFlash(
+      result?.removedFromCloud === false
+        ? `Acesso de ${normalizedUsername} removido neste aparelho.`
+        : `Acesso de ${normalizedUsername} removido.`,
+      "success"
+    );
+  } catch (error) {
+    console.error("Falha ao excluir acesso de membro.", error);
+    setFlash("Nao consegui excluir esse acesso de membro.", "error");
   }
 }
 
@@ -3961,6 +5095,40 @@ function bindEvents() {
     selectSong(button.dataset.songId);
   });
 
+  elements.recentAdditionsPanel?.addEventListener("click", (event) => {
+    const deleteButton = event.target.closest("[data-delete-song]");
+
+    if (deleteButton) {
+      deleteSong(deleteButton.dataset.deleteSong);
+      return;
+    }
+
+    const button = event.target.closest("[data-recent-song-id]");
+
+    if (!button) {
+      return;
+    }
+
+    openRecentSong(button.dataset.recentSongId);
+  });
+
+  elements.weeklySelectionsPanel?.addEventListener("click", (event) => {
+    const removeButton = event.target.closest("[data-remove-weekly-song]");
+
+    if (removeButton) {
+      removeSongFromWeeklySelections(removeButton.dataset.removeWeeklySong);
+      return;
+    }
+
+    const openButton = event.target.closest("[data-weekly-song-id]");
+
+    if (!openButton) {
+      return;
+    }
+
+    openRecentSong(openButton.dataset.weeklySongId);
+  });
+
   elements.lyricsViewer.addEventListener("click", (event) => {
     const closeButton = event.target.closest("[data-close-lyrics]");
     if (closeButton) {
@@ -3986,6 +5154,12 @@ function bindEvents() {
       return;
     }
 
+    const weeklySelectButton = event.target.closest("[data-select-weekly-song]");
+    if (weeklySelectButton) {
+      addSongToWeeklySelections(weeklySelectButton.dataset.selectWeeklySong);
+      return;
+    }
+
     const shareButton = event.target.closest("[data-share-song]");
 
     if (!shareButton) {
@@ -4005,8 +5179,26 @@ function bindEvents() {
     await openAdminModal("create");
   });
 
+  elements.openUsersButton?.addEventListener("click", async () => {
+    await openAdminModal("users");
+  });
+
   elements.openAssetsButton.addEventListener("click", async () => {
     await openAdminModal("assets");
+  });
+
+  elements.memberLogoutButton?.addEventListener("click", () => {
+    if (isAdminUser()) {
+      signOutCloudAdmin();
+    } else {
+      signOutMember();
+    }
+    renderAll();
+    setFlash("Sessao encerrada com sucesso.", "success");
+  });
+
+  elements.memberLoginForm?.addEventListener("submit", async (event) => {
+    await handleAccessLoginSubmit(event);
   });
 
   elements.adminModal.addEventListener("click", async (event) => {
@@ -4084,6 +5276,13 @@ function bindEvents() {
         console.error("Falha ao sair do cadastro.", error);
         setFlash("Nao consegui sair do cadastro agora.", "error");
       }
+
+      return;
+    }
+
+    const deleteMemberButton = event.target.closest("[data-delete-member]");
+    if (deleteMemberButton) {
+      await handleDeleteMember(deleteMemberButton.dataset.deleteMember);
     }
   });
 
@@ -4096,6 +5295,16 @@ function bindEvents() {
     if (event.target.id === "admin-song-form") {
       event.preventDefault();
       await saveSongFromForm(new FormData(event.target));
+      return;
+    }
+
+    if (event.target.id === "rotation-settings-form") {
+      await handleRotationSettingsSubmit(event);
+      return;
+    }
+
+    if (event.target.id === "member-access-form") {
+      await handleMemberAccessSubmit(event);
     }
   });
 
