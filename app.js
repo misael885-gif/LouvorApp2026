@@ -790,6 +790,7 @@ const state = {
   memberAccounts: [],
   memberRecords: [],
   currentMemberUsername: "",
+  currentAccessHash: "",
   currentAccessRole: "guest",
   memberLoggedIn: false,
   rememberedAccess: null,
@@ -805,6 +806,9 @@ const state = {
 let flashTimerId = null;
 let cloudEndpoint = "";
 let coverAssetDbPromise = null;
+let sharedStateSyncTimerId = null;
+let cloudRefreshTimerId = null;
+let cloudRefreshPromise = null;
 
 function registerServiceWorker() {
   if (!("serviceWorker" in navigator) || location.protocol === "file:") {
@@ -882,6 +886,15 @@ function sanitizeWeeklySelectionOwners(input) {
   }
 
   return nextOwners;
+}
+
+function hasOwn(target, key) {
+  return Boolean(target) && Object.prototype.hasOwnProperty.call(target, key);
+}
+
+function normalizeManualRotationOffset(value) {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) ? numericValue : 0;
 }
 
 function normalizeSearch(value) {
@@ -1721,20 +1734,185 @@ async function fetchCloudAppMeta() {
         ? result.memberUsernames.map((member) => cleanText(member)).filter(Boolean)
         : cloudMetaCache.memberAccounts
     );
-    const nextMeta = {
-      rotationNames: sanitizeRotationNames(result?.rotationNames),
-      rotationAnchor: normalizeRotationAnchorValue(result?.rotationAnchor),
-      memberLoginRequired: Boolean(result?.memberLoginRequired) || mergedMembers.memberAccounts.length > 0,
-      memberAccounts: mergedMembers.memberAccounts,
-      memberRecords: mergedMembers.memberRecords
-    };
+      const nextMeta = {
+        rotationNames: sanitizeRotationNames(result?.rotationNames),
+        rotationAnchor: normalizeRotationAnchorValue(result?.rotationAnchor),
+        memberLoginRequired: Boolean(result?.memberLoginRequired) || mergedMembers.memberAccounts.length > 0,
+        memberAccounts: mergedMembers.memberAccounts,
+        memberRecords: mergedMembers.memberRecords,
+        favorites: sanitizeSongIdList(result?.favorites),
+        manualRotationOffset: normalizeManualRotationOffset(result?.manualRotationOffset),
+        weeklySelectionWeekKey: cleanText(result?.weeklySelectionWeekKey) || getCurrentWeekKey(),
+        weeklySelectedSongIds: sanitizeSongIdList(result?.weeklySelectedSongIds),
+        weeklySelectionOwners: sanitizeWeeklySelectionOwners(result?.weeklySelectionOwners)
+      };
 
-    writeAppMetaCache(nextMeta);
-    return nextMeta;
+      writeAppMetaCache(nextMeta);
+      return nextMeta;
   } catch (error) {
     console.warn("Nao consegui ler as configuracoes extras da nuvem. Mantendo o cache local.", error);
     return readAppMetaCache();
   }
+}
+
+function buildSharedAppStatePayload(source = state) {
+  return {
+    favorites: sanitizeSongIdList(source.favorites instanceof Set ? [...source.favorites] : source.favorites),
+    manualRotationOffset: normalizeManualRotationOffset(source.manualRotationOffset),
+    weeklySelectionWeekKey: cleanText(source.weeklySelectionWeekKey) || getCurrentWeekKey(),
+    weeklySelectedSongIds: sanitizeSongIdList(source.weeklySelectedSongIds),
+    weeklySelectionOwners: sanitizeWeeklySelectionOwners(source.weeklySelectionOwners)
+  };
+}
+
+function getCurrentMemberAccessHash() {
+  const normalizedCurrentUsername = normalizeSearch(state.currentMemberUsername);
+
+  if (state.currentAccessHash && normalizedCurrentUsername) {
+    return cleanText(state.currentAccessHash);
+  }
+
+  const session = readAccessSession();
+  if (
+    cleanText(session.role) === "member"
+    && normalizeSearch(session.username) === normalizedCurrentUsername
+    && cleanText(session.authHash)
+  ) {
+    return cleanText(session.authHash);
+  }
+
+  if (
+    state.rememberedAccess?.username
+    && state.rememberedAccess?.password
+    && normalizeSearch(state.rememberedAccess.username) === normalizedCurrentUsername
+  ) {
+    return simpleHash(state.rememberedAccess.password);
+  }
+
+  return "";
+}
+
+function canSyncSharedStateToCloud() {
+  if (!isCloudModeActive()) {
+    return false;
+  }
+
+  if (isAdminUser()) {
+    return Boolean(state.cloudAdminKey);
+  }
+
+  if (isMemberUser()) {
+    return Boolean(cleanText(state.currentMemberUsername) && getCurrentMemberAccessHash());
+  }
+
+  return false;
+}
+
+async function saveSharedStateToCloud(sharedState = buildSharedAppStatePayload(), options = {}) {
+  if (!canSyncSharedStateToCloud()) {
+    return null;
+  }
+
+  const {
+    silent = true
+  } = options;
+  const requestPayload = {
+    sharedState
+  };
+  const requestOptions = {
+    includeAdminKey: isAdminUser()
+  };
+
+  if (!isAdminUser()) {
+    requestPayload.username = cleanText(state.currentMemberUsername);
+    requestPayload.passwordHash = getCurrentMemberAccessHash();
+  }
+
+  try {
+    const result = await requestCloudApi("saveSharedState", requestPayload, requestOptions);
+    const nextSharedState = {
+      favorites: sanitizeSongIdList(result?.sharedState?.favorites ?? sharedState.favorites),
+      manualRotationOffset: normalizeManualRotationOffset(result?.sharedState?.manualRotationOffset ?? sharedState.manualRotationOffset),
+      weeklySelectionWeekKey: cleanText(result?.sharedState?.weeklySelectionWeekKey ?? sharedState.weeklySelectionWeekKey) || getCurrentWeekKey(),
+      weeklySelectedSongIds: sanitizeSongIdList(result?.sharedState?.weeklySelectedSongIds ?? sharedState.weeklySelectedSongIds),
+      weeklySelectionOwners: sanitizeWeeklySelectionOwners(result?.sharedState?.weeklySelectionOwners ?? sharedState.weeklySelectionOwners)
+    };
+
+    writeAppMetaCache(nextSharedState);
+    applyAppMeta(nextSharedState);
+    return nextSharedState;
+  } catch (error) {
+    console.warn("Nao consegui sincronizar o estado compartilhado na nuvem.", error);
+
+    if (!silent) {
+      setFlash("Nao consegui sincronizar essa alteracao na nuvem agora.", "error");
+    }
+
+    throw error;
+  }
+}
+
+function queueSharedStateSync(options = {}) {
+  if (!canSyncSharedStateToCloud()) {
+    return;
+  }
+
+  const {
+    immediate = false,
+    silent = true
+  } = options;
+  const nextSnapshot = buildSharedAppStatePayload();
+
+  if (sharedStateSyncTimerId) {
+    clearTimeout(sharedStateSyncTimerId);
+  }
+
+  sharedStateSyncTimerId = window.setTimeout(() => {
+    sharedStateSyncTimerId = null;
+    saveSharedStateToCloud(nextSnapshot, { silent }).catch(() => {
+      // erro ja tratado na funcao
+    });
+  }, immediate ? 0 : 220);
+}
+
+async function refreshCloudState(options = {}) {
+  if (!isGoogleSheetsConfigured() || !hasGoogleSheetsSupport()) {
+    return;
+  }
+
+  if (cloudRefreshPromise) {
+    return cloudRefreshPromise;
+  }
+
+  const {
+    quiet = true
+  } = options;
+
+  cloudRefreshPromise = (async () => {
+    try {
+      await refreshCloudAdminState();
+      const [cloudMeta, cloudCatalog] = await Promise.all([
+        fetchCloudAppMeta(),
+        fetchCloudCatalog()
+      ]);
+
+      applyAppMeta(cloudMeta);
+      state.catalog = cloudCatalog;
+      saveCatalogSnapshot();
+      saveLocalCatalogBackupSnapshot(state.catalog);
+      renderAll();
+    } catch (error) {
+      console.warn("Nao consegui atualizar os dados sincronizados agora.", error);
+
+      if (!quiet) {
+        setFlash("Nao consegui atualizar os dados sincronizados agora.", "error");
+      }
+    } finally {
+      cloudRefreshPromise = null;
+    }
+  })();
+
+  return cloudRefreshPromise;
 }
 
 async function saveRotationSettingsToCloud(rotationNames, rotationAnchor) {
@@ -1850,21 +2028,23 @@ async function deleteMemberFromCloud(username) {
 }
 
 async function signInMemberCloud(username, password) {
+  const passwordHash = simpleHash(password);
   const result = await requestCloudApi("memberLogin", {
     username: cleanText(username),
-    passwordHash: simpleHash(password)
+    passwordHash
   }, {
     includeAdminKey: false
   });
   const normalizedUsername = cleanText(result?.username || username);
 
   state.currentMemberUsername = normalizedUsername;
+  state.currentAccessHash = passwordHash;
   state.currentAccessRole = "member";
   state.cloudAdminKey = "";
   state.adminLoggedIn = false;
   state.memberLoggedIn = true;
   writeCloudAdminKey("");
-  writeAccessSession("member", normalizedUsername);
+  writeAccessSession("member", normalizedUsername, passwordHash);
   writeMemberSession(normalizedUsername);
 }
 
@@ -1948,6 +2128,7 @@ async function signInCloudAdmin(username, adminKey) {
   });
 
   state.currentMemberUsername = cleanText(username);
+  state.currentAccessHash = "";
   state.currentAccessRole = "admin";
   state.memberLoggedIn = false;
   state.cloudAdminKey = cleanText(adminKey);
@@ -1959,6 +2140,7 @@ async function signInCloudAdmin(username, adminKey) {
 async function signOutCloudAdmin() {
   state.currentAccessRole = "guest";
   state.currentMemberUsername = "";
+  state.currentAccessHash = "";
   state.cloudAdminKey = "";
   writeCloudAdminKey("");
   writeAccessSession("", "");
@@ -1967,6 +2149,7 @@ async function signOutCloudAdmin() {
 
 function signOutMember() {
   state.currentMemberUsername = "";
+  state.currentAccessHash = "";
   state.currentAccessRole = "guest";
   state.memberLoggedIn = false;
   writeAccessSession("", "");
@@ -2818,22 +3001,55 @@ function readAppMetaCache() {
     rotationAnchor: normalizeRotationAnchorValue(cachedMeta.rotationAnchor),
     memberLoginRequired: Boolean(cachedMeta.memberLoginRequired),
     memberAccounts,
-    memberRecords
+    memberRecords,
+    favorites: sanitizeSongIdList(cachedMeta.favorites),
+    manualRotationOffset: normalizeManualRotationOffset(cachedMeta.manualRotationOffset),
+    weeklySelectionWeekKey: cleanText(cachedMeta.weeklySelectionWeekKey) || getCurrentWeekKey(),
+    weeklySelectedSongIds: sanitizeSongIdList(cachedMeta.weeklySelectedSongIds),
+    weeklySelectionOwners: sanitizeWeeklySelectionOwners(cachedMeta.weeklySelectionOwners)
   };
 }
 
 function writeAppMetaCache(meta = {}) {
+  const cachedMeta = readJson(STORAGE_KEYS.appMeta, {});
   const memberRecords = sanitizeMemberRecords(meta.memberRecords);
   const memberAccounts = Array.isArray(meta.memberAccounts)
     ? meta.memberAccounts.map((member) => cleanText(member)).filter(Boolean)
-    : memberRecords.map((member) => member.username);
+    : hasOwn(meta, "memberRecords")
+      ? memberRecords.map((member) => member.username)
+      : Array.isArray(cachedMeta.memberAccounts)
+        ? cachedMeta.memberAccounts.map((member) => cleanText(member)).filter(Boolean)
+        : sanitizeMemberRecords(cachedMeta.memberRecords).map((member) => member.username);
 
   return writeJson(STORAGE_KEYS.appMeta, {
-    rotationNames: sanitizeRotationNames(meta.rotationNames),
-    rotationAnchor: normalizeRotationAnchorValue(meta.rotationAnchor),
-    memberLoginRequired: Boolean(meta.memberLoginRequired),
+    rotationNames: hasOwn(meta, "rotationNames")
+      ? sanitizeRotationNames(meta.rotationNames)
+      : sanitizeRotationNames(cachedMeta.rotationNames),
+    rotationAnchor: hasOwn(meta, "rotationAnchor")
+      ? normalizeRotationAnchorValue(meta.rotationAnchor)
+      : normalizeRotationAnchorValue(cachedMeta.rotationAnchor),
+    memberLoginRequired: hasOwn(meta, "memberLoginRequired")
+      ? Boolean(meta.memberLoginRequired)
+      : Boolean(cachedMeta.memberLoginRequired),
     memberAccounts,
-    memberRecords
+    memberRecords: hasOwn(meta, "memberRecords")
+      ? memberRecords
+      : sanitizeMemberRecords(cachedMeta.memberRecords),
+    favorites: hasOwn(meta, "favorites")
+      ? sanitizeSongIdList(meta.favorites)
+      : sanitizeSongIdList(cachedMeta.favorites),
+    manualRotationOffset: hasOwn(meta, "manualRotationOffset")
+      ? normalizeManualRotationOffset(meta.manualRotationOffset)
+      : normalizeManualRotationOffset(cachedMeta.manualRotationOffset),
+    weeklySelectionWeekKey: hasOwn(meta, "weeklySelectionWeekKey")
+      ? (cleanText(meta.weeklySelectionWeekKey) || getCurrentWeekKey())
+      : (cleanText(cachedMeta.weeklySelectionWeekKey) || getCurrentWeekKey()),
+    weeklySelectedSongIds: hasOwn(meta, "weeklySelectedSongIds")
+      ? sanitizeSongIdList(meta.weeklySelectedSongIds)
+      : sanitizeSongIdList(cachedMeta.weeklySelectedSongIds),
+    weeklySelectionOwners: hasOwn(meta, "weeklySelectionOwners")
+      ? sanitizeWeeklySelectionOwners(meta.weeklySelectionOwners)
+      : sanitizeWeeklySelectionOwners(cachedMeta.weeklySelectionOwners)
   });
 }
 
@@ -2867,19 +3083,22 @@ function readAccessSession() {
   if (!session || !cleanText(session.role)) {
     return {
       role: "guest",
-      username: ""
+      username: "",
+      authHash: ""
     };
   }
 
   return {
     role: cleanText(session.role),
-    username: cleanText(session.username)
+    username: cleanText(session.username),
+    authHash: cleanText(session.authHash)
   };
 }
 
-function writeAccessSession(role = "", username = "") {
+function writeAccessSession(role = "", username = "", authHash = "") {
   const normalizedRole = cleanText(role);
   const normalizedUsername = cleanText(username);
+  const normalizedAuthHash = cleanText(authHash);
 
   if (!normalizedRole || !normalizedUsername) {
     writeJson(STORAGE_KEYS.accessSession, null);
@@ -2888,7 +3107,8 @@ function writeAccessSession(role = "", username = "") {
 
   writeJson(STORAGE_KEYS.accessSession, {
     role: normalizedRole,
-    username: normalizedUsername
+    username: normalizedUsername,
+    authHash: normalizedAuthHash
   });
 }
 
@@ -3032,12 +3252,13 @@ function signInMemberLocal(username, password) {
   }
 
   state.currentMemberUsername = matchingMember.username;
+  state.currentAccessHash = passwordHash;
   state.currentAccessRole = "member";
   state.cloudAdminKey = "";
   state.adminLoggedIn = false;
   state.memberLoggedIn = true;
   writeCloudAdminKey("");
-  writeAccessSession("member", matchingMember.username);
+  writeAccessSession("member", matchingMember.username, passwordHash);
   writeMemberSession(matchingMember.username);
 }
 
@@ -3067,13 +3288,49 @@ function setAdminSession(isLoggedIn) {
 }
 
 function applyAppMeta(meta = {}) {
-  state.rotationNames = sanitizeRotationNames(meta.rotationNames);
-  state.rotationAnchor = normalizeRotationAnchorValue(meta.rotationAnchor);
-  state.memberRecords = sanitizeMemberRecords(meta.memberRecords);
-  state.memberAccounts = Array.isArray(meta.memberAccounts) && meta.memberAccounts.length
-    ? meta.memberAccounts.map((member) => cleanText(member)).filter(Boolean)
-    : state.memberRecords.map((member) => member.username);
-  state.memberLoginRequired = Boolean(meta.memberLoginRequired) && (state.memberAccounts.length > 0 || state.memberRecords.length > 0);
+  if (hasOwn(meta, "rotationNames")) {
+    state.rotationNames = sanitizeRotationNames(meta.rotationNames);
+  }
+
+  if (hasOwn(meta, "rotationAnchor")) {
+    state.rotationAnchor = normalizeRotationAnchorValue(meta.rotationAnchor);
+  }
+
+  if (hasOwn(meta, "memberRecords")) {
+    state.memberRecords = sanitizeMemberRecords(meta.memberRecords);
+  }
+
+  if (hasOwn(meta, "memberAccounts")) {
+    state.memberAccounts = Array.isArray(meta.memberAccounts) && meta.memberAccounts.length
+      ? meta.memberAccounts.map((member) => cleanText(member)).filter(Boolean)
+      : state.memberRecords.map((member) => member.username);
+  } else if (hasOwn(meta, "memberRecords")) {
+    state.memberAccounts = state.memberRecords.map((member) => member.username);
+  }
+
+  if (hasOwn(meta, "memberLoginRequired")) {
+    state.memberLoginRequired = Boolean(meta.memberLoginRequired) && (state.memberAccounts.length > 0 || state.memberRecords.length > 0);
+  }
+
+  if (hasOwn(meta, "favorites")) {
+    state.favorites = new Set(sanitizeSongIdList(meta.favorites));
+  }
+
+  if (hasOwn(meta, "manualRotationOffset")) {
+    state.manualRotationOffset = normalizeManualRotationOffset(meta.manualRotationOffset);
+  }
+
+  if (hasOwn(meta, "weeklySelectionWeekKey")) {
+    state.weeklySelectionWeekKey = cleanText(meta.weeklySelectionWeekKey) || getCurrentWeekKey();
+  }
+
+  if (hasOwn(meta, "weeklySelectedSongIds")) {
+    state.weeklySelectedSongIds = sanitizeSongIdList(meta.weeklySelectedSongIds);
+  }
+
+  if (hasOwn(meta, "weeklySelectionOwners")) {
+    state.weeklySelectionOwners = sanitizeWeeklySelectionOwners(meta.weeklySelectionOwners);
+  }
 
   const currentMemberUsername = cleanText(state.currentMemberUsername);
   const memberExists = state.memberAccounts.some((member) => normalizeSearch(member) === normalizeSearch(currentMemberUsername))
@@ -3081,6 +3338,7 @@ function applyAppMeta(meta = {}) {
 
   if (!state.memberLoginRequired && state.currentAccessRole !== "admin") {
     state.currentMemberUsername = "";
+    state.currentAccessHash = "";
     state.currentAccessRole = state.adminLoggedIn ? "admin" : "guest";
     state.memberLoggedIn = false;
     writeMemberSession("");
@@ -3097,6 +3355,7 @@ function applyAppMeta(meta = {}) {
 
   if (state.currentAccessRole !== "admin") {
     state.currentMemberUsername = "";
+    state.currentAccessHash = "";
     state.currentAccessRole = "guest";
     state.memberLoggedIn = false;
     writeMemberSession("");
@@ -3245,6 +3504,7 @@ function loadAdminState() {
   state.rememberedAccess = readRememberedAccess();
   state.syncMode = isGoogleSheetsConfigured() ? "cloud" : "local";
   state.currentMemberUsername = cleanText(accessSession.username) || readMemberSession();
+  state.currentAccessHash = accessSession.role === "member" ? cleanText(accessSession.authHash) : "";
   state.currentAccessRole = accessSession.role === "admin" || accessSession.role === "member" ? accessSession.role : "guest";
   state.adminLoggedIn = state.currentAccessRole === "admin" && (!isGoogleSheetsConfigured() || Boolean(state.cloudAdminKey));
   state.memberLoggedIn = state.currentAccessRole === "member";
@@ -3415,10 +3675,19 @@ function toggleFavorite(songId) {
     state.favorites.add(normalizedSongId);
   }
 
+  writeAppMetaCache({
+    favorites: [...state.favorites]
+  });
+  queueSharedStateSync({
+    immediate: true,
+    silent: true
+  });
   renderAll();
 }
 
 function syncWeeklySelectedSongs() {
+  const previousIds = sanitizeSongIdList(state.weeklySelectedSongIds);
+  const previousOwners = sanitizeWeeklySelectionOwners(state.weeklySelectionOwners);
   const validSongIds = new Set(state.catalog.map((song) => cleanText(song.id)).filter(Boolean));
   const nextWeeklySelectedIds = sanitizeSongIdList(state.weeklySelectedSongIds)
     .filter((songId) => validSongIds.has(songId));
@@ -3428,6 +3697,17 @@ function syncWeeklySelectedSongs() {
   state.weeklySelectionOwners = Object.fromEntries(
     Object.entries(nextOwners).filter(([songId]) => nextWeeklySelectedIds.includes(songId))
   );
+
+  const hasSelectionChanged = JSON.stringify(previousIds) !== JSON.stringify(state.weeklySelectedSongIds)
+    || JSON.stringify(previousOwners) !== JSON.stringify(state.weeklySelectionOwners);
+
+  if (hasSelectionChanged) {
+    writeAppMetaCache(buildSharedAppStatePayload());
+    queueSharedStateSync({
+      immediate: true,
+      silent: true
+    });
+  }
 }
 
 function ensureWeeklySelectionsCurrentWeek() {
@@ -3445,6 +3725,11 @@ function ensureWeeklySelectionsCurrentWeek() {
   state.weeklySelectionWeekKey = currentWeekKey;
   state.weeklySelectedSongIds = [];
   state.weeklySelectionOwners = {};
+  writeAppMetaCache(buildSharedAppStatePayload());
+  queueSharedStateSync({
+    immediate: true,
+    silent: true
+  });
   return true;
 }
 
@@ -3486,6 +3771,11 @@ function removeSongFromWeeklySelections(songId) {
 
   state.weeklySelectedSongIds = state.weeklySelectedSongIds.filter((currentSongId) => currentSongId !== normalizedSongId);
   delete state.weeklySelectionOwners[normalizedSongId];
+  writeAppMetaCache(buildSharedAppStatePayload());
+  queueSharedStateSync({
+    immediate: true,
+    silent: true
+  });
   renderAll();
   setFlash("Musica removida das selecionadas da semana.", "success");
 }
@@ -3506,6 +3796,11 @@ function addSongToWeeklySelections(songId) {
 
   state.lyricsMinistryMode = false;
   state.selectedSongId = null;
+  writeAppMetaCache(buildSharedAppStatePayload());
+  queueSharedStateSync({
+    immediate: true,
+    silent: true
+  });
   renderAll();
 
   if (elements.weeklySelectionsPanel && !elements.weeklySelectionsPanel.hidden) {
@@ -3744,6 +4039,13 @@ function shiftWeeklySelector(direction) {
   }
 
   state.manualRotationOffset = (Number(state.manualRotationOffset) || 0) + nextDirection;
+  writeAppMetaCache({
+    manualRotationOffset: state.manualRotationOffset
+  });
+  queueSharedStateSync({
+    immediate: true,
+    silent: true
+  });
   renderAll();
 }
 
@@ -4992,15 +5294,16 @@ async function handleAccessLoginSubmit(event) {
         const sameUser = normalizeSearch(localAdminConfig.username) === normalizeSearch(username);
         const samePassword = localAdminConfig.passwordHash === simpleHash(password);
 
-        if (!sameUser || !samePassword) {
-          throw new Error("Usuario ou senha admin invalidos.");
-        }
+          if (!sameUser || !samePassword) {
+            throw new Error("Usuario ou senha admin invalidos.");
+          }
 
-        state.currentMemberUsername = username;
-        state.currentAccessRole = "admin";
-        state.memberLoggedIn = false;
-        writeAccessSession("admin", username);
-        setAdminSession(true);
+          state.currentMemberUsername = username;
+          state.currentAccessHash = "";
+          state.currentAccessRole = "admin";
+          state.memberLoggedIn = false;
+          writeAccessSession("admin", username);
+          setAdminSession(true);
       } else {
         throw new Error("Administrador indisponivel.");
       }
@@ -5011,16 +5314,17 @@ async function handleAccessLoginSubmit(event) {
         console.warn("Nao consegui atualizar os membros logo apos o login admin.", membersError);
       }
 
-      if (rememberAccess) {
-        writeRememberedAccess(username, password);
-      } else {
-        writeRememberedAccess("", "");
-      }
+        if (rememberAccess) {
+          writeRememberedAccess(username, password);
+        } else {
+          writeRememberedAccess("", "");
+        }
 
-      renderAll();
-      setFlash("Administrador conectado com sucesso.", "success");
-      return;
-    } catch (adminError) {
+        await refreshCloudState({ quiet: true });
+        renderAll();
+        setFlash("Administrador conectado com sucesso.", "success");
+        return;
+      } catch (adminError) {
       if (isCloudModeActive()) {
         try {
           await signInMemberCloud(username, password);
@@ -5035,15 +5339,16 @@ async function handleAccessLoginSubmit(event) {
         signInMemberLocal(username, password);
       }
 
-      if (rememberAccess) {
-        writeRememberedAccess(username, password);
-      } else {
-        writeRememberedAccess("", "");
-      }
+        if (rememberAccess) {
+          writeRememberedAccess(username, password);
+        } else {
+          writeRememberedAccess("", "");
+        }
 
-      renderAll();
-      setFlash(`Acesso liberado para ${state.currentMemberUsername}.`, "success");
-    }
+        await refreshCloudState({ quiet: true });
+        renderAll();
+        setFlash(`Acesso liberado para ${state.currentMemberUsername}.`, "success");
+      }
   } catch (error) {
     console.error("Falha no login do app.", error);
     setFlash("Nao consegui entrar. Confira usuario e senha.", "error");
@@ -5574,6 +5879,16 @@ function bindEvents() {
     state.activeProducer = getInitialProducer();
     renderAll();
   });
+
+  window.addEventListener("focus", () => {
+    refreshCloudState({ quiet: true });
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      refreshCloudState({ quiet: true });
+    }
+  });
 }
 
 async function init() {
@@ -5587,6 +5902,14 @@ async function init() {
   renderAll();
   await loadCatalog();
   renderAll();
+
+  if (!cloudRefreshTimerId) {
+    cloudRefreshTimerId = window.setInterval(() => {
+      if (!document.hidden) {
+        refreshCloudState({ quiet: true });
+      }
+    }, 20000);
+  }
 }
 
 init().catch((error) => {

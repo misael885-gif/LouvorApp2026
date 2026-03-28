@@ -94,6 +94,15 @@ function doPost(e) {
       });
     }
 
+    if (action === "saveSharedState") {
+      const access = requireSharedStateAccess_(payload);
+      const sharedState = saveSharedState_(payload.sharedState || {}, access);
+      return jsonResponse({
+        ok: true,
+        sharedState: sharedState
+      });
+    }
+
     if (action === "listMembers") {
       requireAdminKey_(payload.adminKey);
       return jsonResponse({
@@ -219,6 +228,25 @@ function requireAdminLogin_(username, receivedKey) {
   if (!normalizedUsername || normalizedUsername !== normalizedAdminUsername || !normalizedKey || normalizedKey !== settings.adminKey) {
     throw new Error("Usuario ou senha do administrador invalidos.");
   }
+}
+
+function requireSharedStateAccess_(payload) {
+  const adminKey = cleanValue(payload && payload.adminKey);
+
+  if (adminKey) {
+    requireAdminKey_(adminKey);
+    return {
+      role: "admin",
+      username: getSettings_().adminUsername || "admin"
+    };
+  }
+
+  const member = validateMemberLogin_(payload && payload.username, payload && payload.passwordHash);
+
+  return {
+    role: "member",
+    username: member.username
+  };
 }
 
 function getSheet_() {
@@ -431,11 +459,17 @@ function normalizeSong_(song) {
 function buildPublicSettings_() {
   const rotationSettings = readRotationSettings_();
   const members = readMembers_();
+  const sharedState = readSharedState_();
 
   return {
     ok: true,
     rotationNames: rotationSettings.rotationNames,
     rotationAnchor: rotationSettings.rotationAnchor,
+    favorites: sharedState.favorites,
+    manualRotationOffset: sharedState.manualRotationOffset,
+    weeklySelectedSongIds: sharedState.weeklySelectedSongIds,
+    weeklySelectionOwners: sharedState.weeklySelectionOwners,
+    weeklySelectionWeekKey: sharedState.weeklySelectionWeekKey,
     memberLoginRequired: members.length > 0,
     memberUsernames: members.map(function(member) {
       return member.username;
@@ -471,6 +505,73 @@ function saveRotationSettings_(rotationNames, rotationAnchor) {
     rotationNames: normalizedRotationNames,
     rotationAnchor: normalizedRotationAnchor
   };
+}
+
+function readSharedState_() {
+  const properties = PropertiesService.getScriptProperties();
+  var parsedState;
+
+  try {
+    parsedState = JSON.parse(cleanValue(properties.getProperty("SHARED_APP_STATE_JSON")) || "{}");
+  } catch (error) {
+    parsedState = {};
+  }
+
+  var weeklySelectedSongIds = sanitizeStringArray_(parsedState.weeklySelectedSongIds);
+
+  return {
+    favorites: sanitizeStringArray_(parsedState.favorites),
+    manualRotationOffset: normalizeManualRotationOffset_(parsedState.manualRotationOffset),
+    weeklySelectedSongIds: weeklySelectedSongIds,
+    weeklySelectionOwners: sanitizeWeeklySelectionOwners_(parsedState.weeklySelectionOwners, weeklySelectedSongIds),
+    weeklySelectionWeekKey: normalizeWeekKey_(parsedState.weeklySelectionWeekKey)
+  };
+}
+
+function writeSharedState_(sharedState) {
+  const normalizedSharedState = {
+    favorites: sanitizeStringArray_(sharedState.favorites),
+    manualRotationOffset: normalizeManualRotationOffset_(sharedState.manualRotationOffset),
+    weeklySelectedSongIds: sanitizeStringArray_(sharedState.weeklySelectedSongIds),
+    weeklySelectionOwners: sanitizeWeeklySelectionOwners_(sharedState.weeklySelectionOwners, sharedState.weeklySelectedSongIds),
+    weeklySelectionWeekKey: normalizeWeekKey_(sharedState.weeklySelectionWeekKey)
+  };
+
+  PropertiesService.getScriptProperties().setProperty("SHARED_APP_STATE_JSON", JSON.stringify(normalizedSharedState));
+  return normalizedSharedState;
+}
+
+function saveSharedState_(sharedState, access) {
+  const currentState = readSharedState_();
+  const nextState = {
+    favorites: hasOwnProperty_(sharedState, "favorites") ? sanitizeStringArray_(sharedState.favorites) : currentState.favorites,
+    manualRotationOffset: currentState.manualRotationOffset,
+    weeklySelectedSongIds: hasOwnProperty_(sharedState, "weeklySelectedSongIds")
+      ? sanitizeStringArray_(sharedState.weeklySelectedSongIds)
+      : currentState.weeklySelectedSongIds,
+    weeklySelectionOwners: currentState.weeklySelectionOwners,
+    weeklySelectionWeekKey: hasOwnProperty_(sharedState, "weeklySelectionWeekKey")
+      ? normalizeWeekKey_(sharedState.weeklySelectionWeekKey)
+      : currentState.weeklySelectionWeekKey
+  };
+
+  if (access && access.role === "admin" && hasOwnProperty_(sharedState, "manualRotationOffset")) {
+    nextState.manualRotationOffset = normalizeManualRotationOffset_(sharedState.manualRotationOffset);
+  }
+
+  if (hasOwnProperty_(sharedState, "weeklySelectionOwners")) {
+    nextState.weeklySelectionOwners = sanitizeWeeklySelectionOwners_(
+      sharedState.weeklySelectionOwners,
+      nextState.weeklySelectedSongIds
+    );
+  } else {
+    nextState.weeklySelectionOwners = sanitizeWeeklySelectionOwners_(
+      currentState.weeklySelectionOwners,
+      nextState.weeklySelectedSongIds
+    );
+  }
+
+  return writeSharedState_(nextState);
 }
 
 function readMembers_() {
@@ -597,6 +698,63 @@ function validateMemberLogin_(username, passwordHash) {
   }
 
   throw new Error("Usuario ou senha do membro incorretos.");
+}
+
+function sanitizeStringArray_(values) {
+  var source = Array.isArray(values) ? values : [];
+  var normalizedValues = [];
+  var seen = {};
+
+  for (var index = 0; index < source.length; index += 1) {
+    var currentValue = cleanValue(source[index]);
+
+    if (!currentValue || seen[currentValue]) {
+      continue;
+    }
+
+    seen[currentValue] = true;
+    normalizedValues.push(currentValue);
+  }
+
+  return normalizedValues;
+}
+
+function sanitizeWeeklySelectionOwners_(owners, validSongIds) {
+  var source = owners && typeof owners === "object" && !Array.isArray(owners) ? owners : {};
+  var validIds = sanitizeStringArray_(validSongIds);
+  var validLookup = {};
+  var normalizedOwners = {};
+
+  for (var index = 0; index < validIds.length; index += 1) {
+    validLookup[validIds[index]] = true;
+  }
+
+  Object.keys(source).forEach(function(songId) {
+    var normalizedSongId = cleanValue(songId);
+    var normalizedUsername = cleanValue(source[songId]);
+
+    if (!normalizedSongId || !normalizedUsername || !validLookup[normalizedSongId]) {
+      return;
+    }
+
+    normalizedOwners[normalizedSongId] = normalizedUsername;
+  });
+
+  return normalizedOwners;
+}
+
+function normalizeManualRotationOffset_(value) {
+  var numericValue = Number(value);
+  return isFinite(numericValue) ? numericValue : 0;
+}
+
+function normalizeWeekKey_(value) {
+  var normalizedValue = cleanValue(value);
+  return /^\d{4}-\d{2}-\d{2}$/.test(normalizedValue) ? normalizedValue : "";
+}
+
+function hasOwnProperty_(target, key) {
+  return !!target && Object.prototype.hasOwnProperty.call(target, key);
 }
 
 function sanitizeRotationNames_(rotationNames) {
