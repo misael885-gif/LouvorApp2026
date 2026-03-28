@@ -303,6 +303,33 @@ a {
   text-align: center;
 }
 
+.weekly-selector-nav {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.weekly-selector-copy {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+}
+
+.weekly-selector-arrow {
+  min-width: 42px;
+  min-height: 42px;
+  padding: 0;
+  font-size: 1.45rem;
+  line-height: 1;
+}
+
+.weekly-selector-spacer {
+  width: 42px;
+  height: 42px;
+}
+
 .stat-card-centered .eyebrow {
   font-size: 0.98rem;
   letter-spacing: 0.18em;
@@ -1181,6 +1208,20 @@ a {
 
 .member-login-form .admin-flash {
   min-height: 0;
+}
+
+.remember-access-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: rgba(239, 245, 255, 0.82);
+  font-size: 0.95rem;
+}
+
+.remember-access-toggle input {
+  width: 18px;
+  height: 18px;
+  accent-color: #f2bf63;
 }
 
 .admin-modal {

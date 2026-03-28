@@ -9,7 +9,8 @@ const STORAGE_KEYS = {
   cloudAdminKey: "ministerio-multitracks-cloud-admin-key-v2",
   appMeta: "ministerio-multitracks-app-meta-v1",
   memberSession: "ministerio-multitracks-member-session-v1",
-  accessSession: "ministerio-multitracks-access-session-v1"
+  accessSession: "ministerio-multitracks-access-session-v1",
+  rememberedAccess: "ministerio-multitracks-remembered-access-v1"
 };
 
 const SEED_CATALOG_ENABLED = true;
@@ -749,6 +750,7 @@ const elements = {
   memberLoginOverlay: document.querySelector("#member-login-overlay"),
   memberLoginForm: document.querySelector("#member-login-form"),
   memberLoginFlash: document.querySelector("#member-login-flash"),
+  rememberAccessLogin: document.querySelector("#remember-access-login"),
   adminModal: document.querySelector("#admin-modal"),
   adminModalEyebrow: document.querySelector("[data-admin-modal-eyebrow]"),
   adminModalTitle: document.querySelector("#admin-modal-title"),
@@ -765,6 +767,7 @@ const state = {
   query: "",
   favoritesOnly: false,
   favorites: new Set(),
+  manualRotationOffset: 0,
   weeklySelectedSongIds: [],
   weeklySelectionOwners: {},
   weeklySelectionWeekKey: "",
@@ -789,6 +792,7 @@ const state = {
   currentMemberUsername: "",
   currentAccessRole: "guest",
   memberLoggedIn: false,
+  rememberedAccess: null,
   isMigratingCatalog: false,
   isRestoringSeedCatalog: false,
   isClearingAllCovers: false,
@@ -2593,6 +2597,7 @@ function formatWeekRangeLabel(startDate) {
 function getWeeklySelectorInfo(date = new Date()) {
   const weekStart = getWeekStartDate(date);
   const rotationNames = sanitizeRotationNames(state.rotationNames);
+  const manualRotationOffset = Number(state.manualRotationOffset) || 0;
   const [anchorYear, anchorMonth, anchorDay] = normalizeRotationAnchorValue(state.rotationAnchor)
     .split("-")
     .map((value) => Number(value));
@@ -2602,7 +2607,7 @@ function getWeeklySelectorInfo(date = new Date()) {
   const millisecondsPerWeek = 1000 * 60 * 60 * 24 * 7;
   const weekOffset = Math.floor((weekStart.getTime() - anchorDate.getTime()) / millisecondsPerWeek);
   const normalizedIndex =
-    ((weekOffset % rotationNames.length) + rotationNames.length) %
+    (((weekOffset + manualRotationOffset) % rotationNames.length) + rotationNames.length) %
     rotationNames.length;
 
   return {
@@ -2887,6 +2892,45 @@ function writeAccessSession(role = "", username = "") {
   });
 }
 
+function readRememberedAccess() {
+  const stored = readJson(STORAGE_KEYS.rememberedAccess, null);
+
+  if (!stored) {
+    return null;
+  }
+
+  const username = cleanText(stored.username);
+  const password = cleanText(stored.password);
+
+  if (!username || !password) {
+    return null;
+  }
+
+  return {
+    username,
+    password
+  };
+}
+
+function writeRememberedAccess(username = "", password = "") {
+  const normalizedUsername = cleanText(username);
+  const normalizedPassword = cleanText(password);
+
+  if (!normalizedUsername || !normalizedPassword) {
+    writeJson(STORAGE_KEYS.rememberedAccess, null);
+    state.rememberedAccess = null;
+    return;
+  }
+
+  const payload = {
+    username: normalizedUsername,
+    password: normalizedPassword
+  };
+
+  writeJson(STORAGE_KEYS.rememberedAccess, payload);
+  state.rememberedAccess = payload;
+}
+
 function isAdminUser() {
   return state.adminLoggedIn;
 }
@@ -3169,6 +3213,9 @@ function loadPreferences() {
       : stored.activeProducer === "alagoa"
       ? "alagoa"
       : "elite";
+  state.manualRotationOffset = Number.isFinite(Number(stored.manualRotationOffset))
+    ? Number(stored.manualRotationOffset)
+    : 0;
   state.selectedSongId = null;
   state.weeklySelectionWeekKey = cleanText(stored.weeklySelectionWeekKey) || getCurrentWeekKey();
   state.weeklySelectedSongIds = sanitizeSongIdList(stored.weeklySelectedSongIds);
@@ -3183,6 +3230,7 @@ function savePreferences() {
     favoritesOnly: state.favoritesOnly,
     favorites: [...state.favorites],
     activeProducer: state.activeProducer,
+    manualRotationOffset: Number(state.manualRotationOffset) || 0,
     weeklySelectionWeekKey: cleanText(state.weeklySelectionWeekKey) || getCurrentWeekKey(),
     weeklySelectedSongIds: sanitizeSongIdList(state.weeklySelectedSongIds),
     weeklySelectionOwners: sanitizeWeeklySelectionOwners(state.weeklySelectionOwners)
@@ -3194,6 +3242,7 @@ function loadAdminState() {
   const accessSession = readAccessSession();
   state.deletedCatalogKeys = new Set(readDeletedCatalogKeys());
   state.cloudAdminKey = readCloudAdminKey();
+  state.rememberedAccess = readRememberedAccess();
   state.syncMode = isGoogleSheetsConfigured() ? "cloud" : "local";
   state.currentMemberUsername = cleanText(accessSession.username) || readMemberSession();
   state.currentAccessRole = accessSession.role === "admin" || accessSession.role === "member" ? accessSession.role : "guest";
@@ -3565,6 +3614,24 @@ function renderMemberLoginOverlay() {
   elements.memberLoginOverlay.classList.toggle("is-hidden", !shouldShowOverlay);
   elements.memberLoginOverlay.setAttribute("aria-hidden", shouldShowOverlay ? "false" : "true");
 
+  if (shouldShowOverlay && elements.memberLoginForm) {
+    const usernameInput = elements.memberLoginForm.querySelector('input[name="login-username"]');
+    const passwordInput = elements.memberLoginForm.querySelector('input[name="login-password"]');
+    const rememberedAccess = state.rememberedAccess;
+
+    if (usernameInput && !cleanText(usernameInput.value) && rememberedAccess?.username) {
+      usernameInput.value = rememberedAccess.username;
+    }
+
+    if (passwordInput && !cleanText(passwordInput.value) && rememberedAccess?.password) {
+      passwordInput.value = rememberedAccess.password;
+    }
+
+    if (elements.rememberAccessLogin) {
+      elements.rememberAccessLogin.checked = Boolean(rememberedAccess?.username && rememberedAccess?.password);
+    }
+  }
+
   if (!shouldShowOverlay && elements.memberLoginForm) {
     elements.memberLoginForm.reset();
   }
@@ -3574,6 +3641,16 @@ function renderHeroStats() {
   const eliteSummary = getProducerSummary("elite");
   const alagoaSummary = getProducerSummary("alagoa");
   const weeklySelector = getWeeklySelectorInfo();
+  const weeklySelectorLeftControl = isAdminUser()
+    ? `<button class="icon-button weekly-selector-arrow" type="button" data-shift-weekly-selector="-1" aria-label="Voltar escala">
+         &lsaquo;
+       </button>`
+    : `<span class="weekly-selector-spacer" aria-hidden="true"></span>`;
+  const weeklySelectorRightControl = isAdminUser()
+    ? `<button class="icon-button weekly-selector-arrow" type="button" data-shift-weekly-selector="1" aria-label="Avancar escala">
+         &rsaquo;
+       </button>`
+    : `<span class="weekly-selector-spacer" aria-hidden="true"></span>`;
 
   elements.heroStats.innerHTML = `
     <article class="stat-card">
@@ -3592,15 +3669,21 @@ function renderHeroStats() {
       <span class="muted-copy">Todas as musicas disponiveis neste navegador</span>
     </article>
     <article class="stat-card stat-card-centered">
-      <span class="eyebrow">Escala da semana</span>
-      <strong>${escapeHtml(weeklySelector.name)}</strong>
+      <div class="weekly-selector-nav">
+        ${weeklySelectorLeftControl}
+        <div class="weekly-selector-copy">
+          <span class="eyebrow">Escala da semana</span>
+          <strong>${escapeHtml(weeklySelector.name)}</strong>
+        </div>
+        ${weeklySelectorRightControl}
+      </div>
     </article>
   `;
 }
 
 function getRecentAddedSongs(limit = 8) {
   return [...state.catalog]
-    .filter((song) => !cleanText(song.id).startsWith("seed-"))
+    .filter((song) => !cleanText(song.id).startsWith("seed-") && Boolean(resolveSongCoverUrl(song)))
     .sort((leftSong, rightSong) => {
       const leftTime = new Date(leftSong.createdAt || leftSong.updatedAt || 0).getTime();
       const rightTime = new Date(rightSong.createdAt || rightSong.updatedAt || 0).getTime();
@@ -3615,7 +3698,12 @@ function renderRecentAdditionsPanel() {
   }
 
   const recentSongs = getRecentAddedSongs(8);
-  elements.recentAdditionsPanel.hidden = false;
+  elements.recentAdditionsPanel.hidden = recentSongs.length === 0;
+
+  if (!recentSongs.length) {
+    elements.recentAdditionsPanel.innerHTML = "";
+    return;
+  }
 
   elements.recentAdditionsPanel.innerHTML = `
     <div class="recent-additions-head">
@@ -3646,6 +3734,17 @@ function renderRecentAdditionsPanel() {
       }).join("")}
     </div>
   `;
+}
+
+function shiftWeeklySelector(direction) {
+  const nextDirection = Number(direction);
+
+  if (!Number.isFinite(nextDirection) || !nextDirection) {
+    return;
+  }
+
+  state.manualRotationOffset = (Number(state.manualRotationOffset) || 0) + nextDirection;
+  renderAll();
 }
 
 function openRecentSong(songId) {
@@ -4876,6 +4975,7 @@ async function handleAccessLoginSubmit(event) {
   const formData = new FormData(event.target);
   const username = cleanText(formData.get("login-username"));
   const password = cleanText(formData.get("login-password"));
+  const rememberAccess = Boolean(formData.get("remember-access"));
 
   if (!username || !password) {
     setFlash("Preencha usuario e senha para entrar.", "error");
@@ -4911,6 +5011,12 @@ async function handleAccessLoginSubmit(event) {
         console.warn("Nao consegui atualizar os membros logo apos o login admin.", membersError);
       }
 
+      if (rememberAccess) {
+        writeRememberedAccess(username, password);
+      } else {
+        writeRememberedAccess("", "");
+      }
+
       renderAll();
       setFlash("Administrador conectado com sucesso.", "success");
       return;
@@ -4927,6 +5033,12 @@ async function handleAccessLoginSubmit(event) {
         }
       } else {
         signInMemberLocal(username, password);
+      }
+
+      if (rememberAccess) {
+        writeRememberedAccess(username, password);
+      } else {
+        writeRememberedAccess("", "");
       }
 
       renderAll();
@@ -5164,6 +5276,16 @@ function bindEvents() {
   elements.favoritesFilterButton.addEventListener("click", () => {
     state.favoritesOnly = !state.favoritesOnly;
     renderAll();
+  });
+
+  elements.heroStats?.addEventListener("click", (event) => {
+    const shiftButton = event.target.closest("[data-shift-weekly-selector]");
+
+    if (!shiftButton) {
+      return;
+    }
+
+    shiftWeeklySelector(shiftButton.dataset.shiftWeeklySelector);
   });
 
   elements.songList.addEventListener("click", (event) => {
