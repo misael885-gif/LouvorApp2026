@@ -5049,8 +5049,8 @@ function buildMultitrackPlayerMarkup(song) {
             <article class="simple-track-player ${isReady ? "" : "is-disabled"}" data-simple-track-slot="${escapeHtml(slot.id)}">
               <div class="simple-track-head">
                 <div class="simple-track-label">${escapeHtml(slot.label)}</div>
-                <div class="simple-track-head-actions">
-                  <div class="simple-track-status">${isReady ? "Pronto para tocar" : "Sem MP3"}</div>
+                  <div class="simple-track-head-actions">
+                  <div class="simple-track-status">${isReady ? "Preparando MP3..." : "Sem MP3"}</div>
                   ${showAdminUploadShortcut ? `
                     <label class="secondary-button simple-track-upload-button">
                       ${isReady ? "Trocar MP3" : "Carregar MP3"}
@@ -5122,6 +5122,17 @@ function getSimpleTrackAudio(slotId) {
   return playerRoot.querySelector(`[data-simple-track-audio="${slotId}"]`);
 }
 
+function setSimpleTrackStatus(audioNode, text) {
+  const playerItem = audioNode instanceof HTMLElement
+    ? audioNode.closest(".simple-track-player")
+    : null;
+  const statusNode = playerItem?.querySelector(".simple-track-status");
+
+  if (statusNode) {
+    statusNode.textContent = cleanText(text) || "Sem MP3";
+  }
+}
+
 async function ensureSimpleTrackAudioSource(audioNode) {
   if (!(audioNode instanceof HTMLAudioElement)) {
     throw new Error("Player de audio indisponivel.");
@@ -5172,6 +5183,32 @@ async function ensureSimpleTrackAudioSource(audioNode) {
     return objectUrl;
   } finally {
     audioNode.dataset.loadingTrack = "false";
+  }
+}
+
+async function preloadSimpleTrackAudio(audioNode, retries = 2) {
+  if (!(audioNode instanceof HTMLAudioElement) || audioNode.disabled) {
+    return;
+  }
+
+  setSimpleTrackStatus(audioNode, "Carregando MP3...");
+
+  try {
+    await ensureSimpleTrackAudioSource(audioNode);
+    setSimpleTrackStatus(audioNode, "Pronto para tocar");
+  } catch (error) {
+    if (retries > 0) {
+      setSimpleTrackStatus(audioNode, "Tentando carregar...");
+      window.setTimeout(() => {
+        preloadSimpleTrackAudio(audioNode, retries - 1).catch(() => {
+          // ignora erro final no retry agendado
+        });
+      }, 1400);
+      return;
+    }
+
+    console.error("Falha ao pre-carregar o MP3.", error);
+    setSimpleTrackStatus(audioNode, "Toque para tentar");
   }
 }
 
@@ -5227,7 +5264,16 @@ async function handleSelectedSongSingleTrackUpload(songId, slotId, file) {
       const syncedCatalog = await fetchCloudCatalog();
 
       if (syncedCatalog.length) {
-        state.catalog = syncedCatalog;
+        const syncedSong = syncedCatalog.find((item) => item.id === normalizedSongId);
+        const syncedTrackReady = Boolean(
+          resolveSongAudioTrackUrl(getSongAudioTracks(syncedSong)?.[slot.id])
+        );
+
+        state.catalog = syncedTrackReady
+          ? syncedCatalog
+          : buildSeedBackedCatalog(
+              syncedCatalog.map((item) => (item.id === normalizedSongId ? savedSong : item))
+            );
       }
     } catch (syncError) {
       console.warn("Nao consegui atualizar o catalogo logo apos enviar a track.", syncError);
@@ -5290,7 +5336,7 @@ function hydrateSimpleTrackPlayers(song) {
     audioNode.addEventListener("play", handlePlay);
 
     if (!audioNode.disabled) {
-      ensureSimpleTrackAudioSource(audioNode).catch((error) => {
+      preloadSimpleTrackAudio(audioNode).catch((error) => {
         console.error(`Falha ao preparar o MP3 da faixa ${slotId}.`, error);
       });
     }
