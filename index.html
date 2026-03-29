@@ -12,7 +12,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=20260328-modules-1">
 </head>
 <body>
   <div class="ambient ambient-a"></div>
@@ -152,6 +152,7 @@
 
       <div id="admin-dashboard-view" class="admin-view"></div>
       <input id="cover-batch-input" type="file" accept="image/*" multiple hidden>
+      <input id="track-batch-input" type="file" accept=".mp3,audio/mpeg" multiple hidden>
     </section>
   </div>
 
@@ -163,7 +164,7 @@
     </section>
   </div>
 
-  <script src="google-sheets-config.js"></script>
-  <script src="app.js"></script>
+<script src="google-sheets-config.js?v=20260329-fix-accented-names-1"></script>
+<script src="app.js?v=20260329-fix-accented-names-1"></script>
 </body>
 </html>

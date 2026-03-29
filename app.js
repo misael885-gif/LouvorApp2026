@@ -57,6 +57,192 @@ const PRODUCERS = {
   }
 };
 
+const MULTITRACK_SLOTS = [
+    { id: "drums", label: "DRUMS", channel: "1" },
+    { id: "back", label: "BACK", channel: "2" },
+    { id: "keys", label: "TECLADOS", channel: "3" },
+    { id: "gtr", label: "GTR", channel: "4" },
+    { id: "full", label: "MUSICA", channel: "5" },
+    { id: "click", label: "CLICK E GUIA", channel: "6" }
+  ];
+
+  const MULTITRACK_DB_MIN = -100;
+  const MULTITRACK_DB_MAX = 12;
+  const MAX_STEM_UPLOAD_BYTES = 18 * 1024 * 1024;
+
+  function cleanTrackText(value) {
+    return String(value ?? "").trim();
+  }
+
+  function createEmptyAudioTracks() {
+    return MULTITRACK_SLOTS.reduce((tracks, slot) => {
+      tracks[slot.id] = {
+        label: slot.label,
+        url: "",
+        fileId: ""
+      };
+      return tracks;
+    }, {});
+  }
+
+  function normalizeSongAudioTracks(input) {
+    let source = input;
+
+    if (typeof source === "string") {
+      try {
+        source = JSON.parse(source);
+      } catch (_error) {
+        source = {};
+      }
+    }
+
+    if (!source || typeof source !== "object") {
+      source = {};
+    }
+
+    const tracks = createEmptyAudioTracks();
+
+    for (const slot of MULTITRACK_SLOTS) {
+      const entry = source[slot.id] && typeof source[slot.id] === "object"
+        ? source[slot.id]
+        : {};
+
+      tracks[slot.id] = {
+        label: slot.label,
+        url: cleanTrackText(entry.url),
+        fileId: cleanTrackText(entry.fileId)
+      };
+    }
+
+    return tracks;
+  }
+
+  function buildGoogleDriveStemUrl(fileId, fallbackUrl = "") {
+    const normalizedFileId = cleanTrackText(fileId);
+
+    if (normalizedFileId) {
+      return `https://drive.usercontent.google.com/download?id=${encodeURIComponent(normalizedFileId)}&export=download&authuser=0&confirm=t`;
+    }
+
+    return cleanTrackText(fallbackUrl);
+  }
+
+  function resolveSongAudioTrackUrl(trackLike) {
+    return buildGoogleDriveStemUrl(trackLike?.fileId, cleanTrackText(trackLike?.url));
+  }
+
+  function getSongAudioTracks(songLike) {
+    return normalizeSongAudioTracks(songLike?.audioTracks);
+  }
+
+  function getSongAudioTrack(songLike, slotId) {
+    return getSongAudioTracks(songLike)[slotId] || createEmptyAudioTracks()[slotId];
+  }
+
+  function songHasMultitrackPlayer(songLike) {
+    const tracks = getSongAudioTracks(songLike);
+    return MULTITRACK_SLOTS.some((slot) => Boolean(resolveSongAudioTrackUrl(tracks[slot.id])));
+  }
+
+  function formatDbValue(dbValue) {
+    const normalizedValue = Number.isFinite(Number(dbValue)) ? Number(dbValue) : 0;
+    const roundedValue = Math.round(normalizedValue);
+
+    if (roundedValue <= MULTITRACK_DB_MIN) {
+      return "-100 dB";
+    }
+
+    if (roundedValue > 0) {
+      return `+${roundedValue} dB`;
+    }
+
+    return `${roundedValue} dB`;
+  }
+
+  function convertDbToGain(dbValue) {
+    const normalizedValue = Number.isFinite(Number(dbValue)) ? Number(dbValue) : 0;
+
+    if (normalizedValue <= MULTITRACK_DB_MIN) {
+      return 0;
+    }
+
+    return Math.pow(10, normalizedValue / 20);
+  }
+
+  function formatPlayerTime(seconds) {
+    const safeSeconds = Number.isFinite(Number(seconds)) ? Math.max(0, Number(seconds)) : 0;
+    const totalSeconds = Math.floor(safeSeconds);
+    const minutes = Math.floor(totalSeconds / 60);
+    const remainingSeconds = totalSeconds % 60;
+    return `${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
+  }
+
+  function createEmptyMultitrackPlayerState() {
+    return {
+      songId: "",
+      ready: false,
+      isPlaying: false,
+      currentTime: 0,
+      duration: 0,
+      referenceSlotId: "",
+      context: null,
+      tracks: new Map(),
+      rafId: 0,
+      syncTimerId: 0,
+      progressPointerDown: false,
+      startedAt: 0,
+      instanceToken: ""
+    };
+  }
+
+  function createMultitrackAudioContext() {
+    const ContextConstructor = window.AudioContext || window.webkitAudioContext;
+
+    if (typeof ContextConstructor !== "function") {
+      return null;
+    }
+
+    return new ContextConstructor({
+      latencyHint: "interactive"
+    });
+  }
+
+  function decodeAudioBuffer(context, arrayBuffer) {
+    if (!context) {
+      return Promise.reject(new Error("AudioContext indisponivel."));
+    }
+
+    const bufferCopy = arrayBuffer.slice(0);
+
+    return new Promise((resolve, reject) => {
+      const maybePromise = context.decodeAudioData(bufferCopy, resolve, reject);
+
+      if (maybePromise && typeof maybePromise.then === "function") {
+        maybePromise.then(resolve).catch(reject);
+      }
+    });
+  }
+
+  async function fetchAndDecodeMultitrackBuffer(trackUrl, context) {
+    const response = await fetch(trackUrl, {
+      method: "GET",
+      mode: "cors",
+      cache: "no-store"
+    });
+
+    if (!response.ok) {
+      throw new Error(`Falha ao baixar a track (${response.status}).`);
+    }
+
+    const audioArrayBuffer = await response.arrayBuffer();
+
+    if (!audioArrayBuffer.byteLength) {
+      throw new Error("Track vazia recebida da nuvem.");
+    }
+
+    return decodeAudioBuffer(context, audioArrayBuffer);
+  }
+
 const seedGroups = [
   {
     producer: "elite",
@@ -726,6 +912,7 @@ const seedGroups = [
   }
 ];
 
+
 const elements = {
   heroStats: document.querySelector("#hero-stats"),
   screenElite: document.querySelector("#screen-elite"),
@@ -758,7 +945,8 @@ const elements = {
   adminAuthView: document.querySelector("#admin-auth-view"),
   adminDashboardView: document.querySelector("#admin-dashboard-view"),
   adminFlash: document.querySelector("#admin-flash"),
-  coverBatchInput: document.querySelector("#cover-batch-input")
+  coverBatchInput: document.querySelector("#cover-batch-input"),
+  trackBatchInput: document.querySelector("#track-batch-input")
 };
 
 const state = {
@@ -782,6 +970,8 @@ const state = {
   adminCoverDraftChanged: false,
   adminProducerFilter: getInitialProducer(),
   adminFilter: "",
+  adminTrackDraftFiles: {},
+  trackBatchTargetSongId: "",
   deletedCatalogKeys: new Set(),
   cloudAdminKey: "",
   rotationNames: [...WEEKLY_SELECTOR_ROTATION],
@@ -809,15 +999,28 @@ let coverAssetDbPromise = null;
 let sharedStateSyncTimerId = null;
 let cloudRefreshTimerId = null;
 let cloudRefreshPromise = null;
+let multitrackPlayer = createEmptyMultitrackPlayerState();
 
 function registerServiceWorker() {
   if (!("serviceWorker" in navigator) || location.protocol === "file:") {
     return;
   }
 
+  let hasReloadedForNewServiceWorker = false;
+
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (hasReloadedForNewServiceWorker) {
+      return;
+    }
+
+    hasReloadedForNewServiceWorker = true;
+    window.location.reload();
+  });
+
   window.addEventListener("load", async () => {
     try {
-      await navigator.serviceWorker.register("./sw.js");
+      const registration = await navigator.serviceWorker.register("./sw.js");
+      await registration.update();
     } catch (error) {
       console.error("Nao consegui registrar o service worker.", error);
     }
@@ -1016,6 +1219,7 @@ function mapCloudSongToRecord(row = {}) {
     source: row.source,
     coverUrl: row.coverUrl,
     coverFileId: row.coverFileId,
+    audioTracks: row.audioTracks,
     youtubeUrl: row.youtubeUrl,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
@@ -1033,6 +1237,7 @@ function mapRecordToCloudSong(song = {}) {
     source: cleanText(song.source),
     coverUrl: cleanText(song.coverUrl),
     coverFileId: cleanText(song.coverFileId),
+    audioTracks: normalizeSongAudioTracks(song.audioTracks),
     youtubeUrl: cleanText(song.youtubeUrl),
     createdAt: song.createdAt || new Date().toISOString(),
     updatedAt: song.updatedAt || new Date().toISOString()
@@ -1290,6 +1495,9 @@ function sortCatalogSongs(catalog) {
 }
 
 function getSongCompletenessScore(song) {
+  const audioTracks = getSongAudioTracks(song);
+  const audioTrackCount = MULTITRACK_SLOTS.filter((slot) => Boolean(resolveSongAudioTrackUrl(audioTracks[slot.id]))).length;
+
   return [
     cleanMultilineText(song.lyrics),
     cleanText(song.notes),
@@ -1297,7 +1505,7 @@ function getSongCompletenessScore(song) {
     cleanText(song.coverUrl),
     cleanText(song.coverAssetId),
     cleanText(song.coverFileId)
-  ].filter(Boolean).length;
+  ].filter(Boolean).length + audioTrackCount;
 }
 
 function pickPreferredSongRecord(currentSong, nextSong) {
@@ -1407,6 +1615,7 @@ function mergeSeedSongWithExisting(seedSong, existingSong) {
     coverUrl: existingSong.coverUrl,
     coverFileId: existingSong.coverFileId,
     coverAssetId: existingSong.coverAssetId,
+    audioTracks: existingSong.audioTracks,
     youtubeUrl: existingSong.youtubeUrl,
     createdAt: existingSong.createdAt || seedSong.createdAt,
     updatedAt: existingSong.updatedAt || seedSong.updatedAt
@@ -2278,6 +2487,7 @@ async function restoreSeedCatalog() {
       coverUrl: matchedSong.coverUrl,
       coverFileId: matchedSong.coverFileId,
       coverAssetId: matchedSong.coverAssetId,
+      audioTracks: matchedSong.audioTracks,
       youtubeUrl: matchedSong.youtubeUrl,
       createdAt: matchedSong.createdAt || seedSong.createdAt,
       updatedAt: matchedSong.updatedAt || seedSong.updatedAt
@@ -2516,6 +2726,351 @@ function resetAdminCoverDraft(url = "") {
   state.adminCoverDraftChanged = false;
 }
 
+function resetAdminTrackDrafts() {
+  state.adminTrackDraftFiles = {};
+  state.trackBatchTargetSongId = "";
+
+  if (elements.trackBatchInput instanceof HTMLInputElement) {
+    elements.trackBatchInput.value = "";
+  }
+}
+
+function getAdminTrackDraftFile(slotId) {
+  const normalizedSlotId = cleanText(slotId);
+  return state.adminTrackDraftFiles?.[normalizedSlotId] instanceof File
+    ? state.adminTrackDraftFiles[normalizedSlotId]
+    : null;
+}
+
+function setAdminTrackDraftFile(slotId, file) {
+  const normalizedSlotId = cleanText(slotId);
+
+  if (!normalizedSlotId) {
+    return;
+  }
+
+  if (!(file instanceof File)) {
+    delete state.adminTrackDraftFiles[normalizedSlotId];
+    return;
+  }
+
+  state.adminTrackDraftFiles[normalizedSlotId] = file;
+}
+
+function inferStemSlotIdFromFileName(fileName) {
+  const normalizedName = normalizeSearch(String(fileName || "").replace(/\.[^.]+$/, ""));
+
+  if (!normalizedName) {
+    return "";
+  }
+
+  if (/^drums?$/.test(normalizedName) || /(^| )(drums|drum|bateria)( |$)/.test(normalizedName)) {
+    return "drums";
+  }
+
+  if (/^back(s)?$/.test(normalizedName) || /(^| )(back|backs|backing)( |$)/.test(normalizedName)) {
+    return "back";
+  }
+
+  if (/^teclados?$/.test(normalizedName) || /(teclados|teclado|complementos|keys|key|synth|pad)/.test(normalizedName)) {
+    return "keys";
+  }
+
+  if (/^gtr$/.test(normalizedName) || /(^| )(gtr|guitar|guitarra)( |$)/.test(normalizedName)) {
+    return "gtr";
+  }
+
+  if (/^musica$/.test(normalizedName) || /(musica completa|mix completa|completa|full|stereo|master)/.test(normalizedName)) {
+    return "full";
+  }
+
+  if (/^click e guia$/.test(normalizedName) || /(click|guia|guide|cue)/.test(normalizedName)) {
+    return "click";
+  }
+
+  return "";
+}
+
+function refreshAdminTrackDraftUi() {
+  const form = elements.adminModal?.querySelector("#admin-song-form");
+
+  if (!(form instanceof HTMLFormElement)) {
+    return;
+  }
+
+  const editingSong = state.catalog.find((song) => song.id === state.editingSongId) || null;
+  const audioTracks = getSongAudioTracks(editingSong);
+
+  for (const slot of MULTITRACK_SLOTS) {
+    const item = form.querySelector(`[data-track-upload-slot="${slot.id}"]`);
+
+    if (!item) {
+      continue;
+    }
+
+    const uploadedTrackUrl = resolveSongAudioTrackUrl(audioTracks[slot.id]);
+    const draftFile = getAdminTrackDraftFile(slot.id);
+    const isDraftReady = draftFile instanceof File;
+    const isUploadedReady = Boolean(uploadedTrackUrl);
+    const isReady = isDraftReady || isUploadedReady;
+    const status = item.querySelector(`[data-track-status="${slot.id}"]`);
+    const hint = item.querySelector(`[data-track-hint="${slot.id}"]`);
+    const fileName = item.querySelector(`[data-track-file-name="${slot.id}"]`);
+
+    item.classList.toggle("is-ready", isReady);
+    item.classList.toggle("has-draft", isDraftReady);
+
+    if (status) {
+      status.textContent = isDraftReady
+        ? "Pronto para enviar"
+        : isUploadedReady
+          ? "MP3 pronto"
+          : "Sem MP3";
+      status.classList.toggle("is-ready", isReady);
+    }
+
+    if (hint) {
+      hint.textContent = isDraftReady
+        ? "Arquivo separado. Agora e so salvar a musica."
+        : isUploadedReady
+          ? "Escolha outro MP3 se quiser substituir essa faixa."
+          : "Envie o MP3 dessa faixa.";
+    }
+
+    if (fileName) {
+      fileName.textContent = isDraftReady
+        ? draftFile.name
+        : isUploadedReady
+          ? "Track salva na nuvem"
+          : "Nenhum arquivo escolhido";
+    }
+  }
+}
+
+function getAdminTrackFileMap(formElement) {
+  const selectedTracks = {};
+
+  for (const slot of MULTITRACK_SLOTS) {
+    const draftFile = getAdminTrackDraftFile(slot.id);
+
+    if (draftFile instanceof File) {
+      selectedTracks[slot.id] = draftFile;
+    }
+  }
+
+  if (!(formElement instanceof HTMLFormElement)) {
+    return selectedTracks;
+  }
+
+  for (const slot of MULTITRACK_SLOTS) {
+    const input = formElement.querySelector(`[data-track-upload="${slot.id}"]`);
+    const file = input instanceof HTMLInputElement ? input.files?.[0] : null;
+
+    if (file instanceof File && file.size > 0) {
+      selectedTracks[slot.id] = file;
+      setAdminTrackDraftFile(slot.id, file);
+    }
+  }
+
+  return selectedTracks;
+}
+
+function buildMatchedTrackFilesResult(fileList) {
+  const files = Array.from(fileList || []);
+  const matchedTracks = {};
+  const matchedSlots = new Set();
+  const unmatchedFiles = [];
+  const duplicateFiles = [];
+
+  for (const file of files) {
+    const slotId = inferStemSlotIdFromFileName(file.name);
+
+    if (!slotId) {
+      unmatchedFiles.push(file.name);
+      continue;
+    }
+
+    if (matchedTracks[slotId]) {
+      duplicateFiles.push(file.name);
+      continue;
+    }
+
+    matchedSlots.add(slotId);
+    matchedTracks[slotId] = file;
+  }
+
+  return {
+    matchedTracks,
+    matchedSlots,
+    unmatchedFiles,
+    duplicateFiles
+  };
+}
+
+function handleBatchTrackFiles(fileList) {
+  const files = Array.from(fileList || []);
+
+  if (!files.length) {
+    return;
+  }
+
+  const {
+    matchedTracks,
+    matchedSlots,
+    unmatchedFiles,
+    duplicateFiles
+  } = buildMatchedTrackFilesResult(files);
+
+  for (const [slotId, file] of Object.entries(matchedTracks)) {
+    setAdminTrackDraftFile(slotId, file);
+  }
+
+  refreshAdminTrackDraftUi();
+
+  if (!matchedSlots.size) {
+    setFlash("Nao consegui identificar essas tracks pelo nome do arquivo. Use BACK, TECLADOS, DRUMS, GTR, MUSICA e CLICK E GUIA.", "error");
+    return;
+  }
+
+  if (duplicateFiles.length || unmatchedFiles.length) {
+    const warningBits = [];
+
+    if (duplicateFiles.length) {
+      warningBits.push(`repetidas e ignoradas: ${duplicateFiles.join(", ")}`);
+    }
+
+    if (unmatchedFiles.length) {
+      warningBits.push(`sem encaixe: ${unmatchedFiles.join(", ")}`);
+    }
+
+    setFlash(`Carreguei ${matchedSlots.size} track(s). Arquivos ${warningBits.join(" | ")}.`, "error");
+    return;
+  }
+
+  setFlash(`${matchedSlots.size} track(s) carregadas no lugar certo. Agora e so salvar a musica.`, "success");
+}
+
+async function handleSelectedSongTrackUpload(songId, fileList) {
+  const normalizedSongId = cleanText(songId);
+  const song = state.catalog.find((item) => item.id === normalizedSongId);
+
+  if (!song) {
+    setFlash("Nao encontrei a musica para receber as tracks.", "error");
+    return;
+  }
+
+  if (!isCloudModeActive()) {
+    setFlash("Ative a nuvem para enviar e compartilhar as tracks entre os aparelhos.", "error");
+    return;
+  }
+
+  if (!state.adminLoggedIn) {
+    setFlash("Entre como administrador para enviar as tracks da musica.", "error");
+    return;
+  }
+
+  const {
+    matchedTracks,
+    matchedSlots,
+    unmatchedFiles,
+    duplicateFiles
+  } = buildMatchedTrackFilesResult(fileList);
+
+  if (!matchedSlots.size) {
+    setFlash("Nao consegui identificar essas tracks pelo nome do arquivo. Use BACK, TECLADOS, DRUMS, GTR, MUSICA e CLICK E GUIA.", "error");
+    return;
+  }
+
+  try {
+    const shouldResetSongTracks = matchedSlots.size === MULTITRACK_SLOTS.length;
+    const nextAudioTracks = shouldResetSongTracks
+      ? createEmptyAudioTracks()
+      : normalizeSongAudioTracks(getSongAudioTracks(song));
+    let savedSong = song;
+
+    if (shouldResetSongTracks) {
+      setFlash(`Limpando os MP3s antigos de ${song.title} para subir o lote novo...`, "success");
+      const clearedSong = await resetSongTracksInCloud(song.id);
+      if (clearedSong?.id) {
+        savedSong = clearedSong;
+      }
+    }
+
+    for (const slot of MULTITRACK_SLOTS) {
+      const selectedTrackFile = matchedTracks[slot.id];
+
+      if (!(selectedTrackFile instanceof File)) {
+        continue;
+      }
+
+      setFlash(`Enviando ${slot.label.toLowerCase()} para ${song.title}...`, "success");
+      const uploadedTrack = await uploadStemTrackToCloud(song.id, song.producer, slot.id, selectedTrackFile);
+      nextAudioTracks[slot.id] = {
+        label: slot.label,
+        url: uploadedTrack.url,
+        fileId: uploadedTrack.fileId
+      };
+
+      if (uploadedTrack.song?.id) {
+        savedSong = uploadedTrack.song;
+      }
+    }
+
+    if (!savedSong?.id) {
+      savedSong = await saveSongToCloud(createSongRecord({
+        ...song,
+        audioTracks: nextAudioTracks,
+        updatedAt: new Date().toISOString()
+      }));
+    } else {
+      savedSong = createSongRecord({
+        ...savedSong,
+        audioTracks: nextAudioTracks,
+        updatedAt: new Date().toISOString()
+      });
+    }
+
+    clearSongCatalogKeyDeleted(savedSong);
+    state.catalog = buildSeedBackedCatalog(
+      state.catalog.map((item) => (item.id === song.id ? savedSong : item))
+    );
+
+    try {
+      const syncedCatalog = await fetchCloudCatalog();
+
+      if (syncedCatalog.length) {
+        state.catalog = syncedCatalog;
+      }
+    } catch (syncError) {
+      console.warn("Nao consegui recarregar o catalogo remoto logo apos enviar as tracks.", syncError);
+    }
+
+    state.selectedSongId = savedSong.id;
+    saveCatalog();
+    renderAll();
+
+    if (duplicateFiles.length || unmatchedFiles.length) {
+      const warningBits = [];
+
+      if (duplicateFiles.length) {
+        warningBits.push(`repetidas e ignoradas: ${duplicateFiles.join(", ")}`);
+      }
+
+      if (unmatchedFiles.length) {
+        warningBits.push(`sem encaixe: ${unmatchedFiles.join(", ")}`);
+      }
+
+      setFlash(`${matchedSlots.size} track(s) enviada(s) para ${savedSong.title}. Arquivos ${warningBits.join(" | ")}.`, "success");
+      return;
+    }
+
+    setFlash(`${matchedSlots.size} track(s) enviada(s) para ${savedSong.title}.`, "success");
+  } catch (error) {
+    console.error("Falha ao enviar as tracks da musica selecionada.", error);
+    setFlash("Nao consegui salvar essas tracks na musica agora.", "error");
+  }
+}
+
 function setAdminCoverDraft(url = "") {
   state.adminCoverDraftUrl = cleanText(url);
   state.adminCoverDraftChanged = true;
@@ -2568,11 +3123,108 @@ function readFileAsDataUrl(file) {
         return;
       }
 
-      reject(new Error("Nao consegui ler a imagem."));
+      reject(new Error("Nao consegui ler o arquivo."));
     };
-    reader.onerror = () => reject(new Error("Nao consegui ler a imagem."));
+    reader.onerror = () => reject(new Error("Nao consegui ler o arquivo."));
     reader.readAsDataURL(file);
   });
+}
+
+function getStemExtensionFromFile(file) {
+  const fileName = cleanText(file?.name || "");
+  const matchedExtension = fileName.match(/\.([a-z0-9]+)$/i);
+
+  if (matchedExtension?.[1]) {
+    return matchedExtension[1].toLowerCase();
+  }
+
+  if (cleanText(file?.type).toLowerCase() === "audio/mpeg") {
+    return "mp3";
+  }
+
+  return "mp3";
+}
+async function uploadStemTrackToCloud(songId, producer, slotId, file) {
+  if (!(file instanceof File)) {
+    return {
+      url: "",
+      fileId: ""
+    };
+  }
+
+  if (file.size > MAX_STEM_UPLOAD_BYTES) {
+    throw new Error(`O arquivo ${file.name} passou do limite recomendado de 18 MB. Exporte um MP3 menor para subir essa faixa.`);
+  }
+
+  const fileDataUrl = await readFileAsDataUrl(file);
+  const result = await requestCloudApi("uploadStemTrack", {
+    songId: cleanText(songId),
+    producer: cleanText(producer),
+    slotId: cleanText(slotId),
+    fileDataUrl,
+    extension: getStemExtensionFromFile(file)
+  });
+
+  return {
+    url: cleanText(result?.trackUrl) || buildGoogleDriveStemUrl(result?.trackFileId, ""),
+    fileId: cleanText(result?.trackFileId),
+    song: result?.song ? mapCloudSongToRecord(result.song) : null
+  };
+}
+
+async function resetSongTracksInCloud(songId) {
+  const normalizedSongId = cleanText(songId);
+
+  if (!normalizedSongId) {
+    throw new Error("Musica invalida para limpar as tracks.");
+  }
+
+  const result = await requestCloudApi("resetSongTracks", {
+    songId: normalizedSongId
+  });
+
+  return mapCloudSongToRecord(result?.song || {});
+}
+
+async function clearSelectedSongTracks(songId) {
+  const normalizedSongId = cleanText(songId);
+
+  if (!normalizedSongId) {
+    setFlash("Nao encontrei a musica para limpar os MP3s.", "error");
+    return;
+  }
+
+  if (!isCloudModeActive() || !state.adminLoggedIn) {
+    setFlash("Entre como administrador para limpar os MP3s dessa musica.", "error");
+    return;
+  }
+
+  try {
+    setFlash("Limpando os MP3s da musica na nuvem...", "success");
+    const clearedSong = await resetSongTracksInCloud(normalizedSongId);
+    clearSongCatalogKeyDeleted(clearedSong);
+    state.catalog = buildSeedBackedCatalog(
+      state.catalog.map((song) => (song.id === normalizedSongId ? clearedSong : song))
+    );
+
+    try {
+      const syncedCatalog = await fetchCloudCatalog();
+
+      if (syncedCatalog.length) {
+        state.catalog = syncedCatalog;
+      }
+    } catch (syncError) {
+      console.warn("Nao consegui recarregar o catalogo depois de limpar os MP3s.", syncError);
+    }
+
+    state.selectedSongId = normalizedSongId;
+    saveCatalog();
+    renderAll();
+    setFlash("MP3s antigos removidos com sucesso. Agora voce pode subir o lote limpo dessa musica.", "success");
+  } catch (error) {
+    console.error("Falha ao limpar os MP3s da musica.", error);
+    setFlash("Nao consegui limpar os MP3s dessa musica agora.", "error");
+  }
 }
 
 function loadImageElement(src) {
@@ -3387,6 +4039,7 @@ function createSongRecord(input) {
     coverUrl: cleanText(input.coverUrl),
     coverFileId: cleanText(input.coverFileId),
     coverAssetId: cleanText(input.coverAssetId),
+    audioTracks: normalizeSongAudioTracks(input.audioTracks),
     youtubeUrl: parsedYouTube.canonicalUrl,
     videoId: parsedYouTube.videoId,
     createdAt,
@@ -3632,8 +4285,44 @@ function getSongsByProducer(producer) {
   return state.catalog.filter((song) => song.producer === producer);
 }
 
+function buildSeedSongKeyMap() {
+  const seedSongs = buildSeedCatalog();
+  const songKeysByProducer = new Map();
+
+  for (const song of seedSongs) {
+    const producer = cleanText(song.producer);
+    const songKey = buildSongCatalogKey(song);
+
+    if (!producer || !songKey) {
+      continue;
+    }
+
+    if (!songKeysByProducer.has(producer)) {
+      songKeysByProducer.set(producer, new Set());
+    }
+
+    songKeysByProducer.get(producer).add(songKey);
+  }
+
+  return songKeysByProducer;
+}
+
+function getPublicSongsByProducer(producer) {
+  const normalizedProducer = cleanText(producer);
+  const songs = getSongsByProducer(normalizedProducer);
+
+  if (!ENABLED_SEED_PRODUCERS.has(normalizedProducer)) {
+    return songs;
+  }
+
+  const seedSongKeyMap = buildSeedSongKeyMap();
+  const validKeys = seedSongKeyMap.get(normalizedProducer) || new Set();
+
+  return songs.filter((song) => validKeys.has(buildSongCatalogKey(song)));
+}
+
 function getProducerSummary(producer) {
-  const songs = getSongsByProducer(producer);
+  const songs = getPublicSongsByProducer(producer);
   const readySongs = songs.filter((song) => song.videoId);
 
   return {
@@ -3645,7 +4334,7 @@ function getProducerSummary(producer) {
 
 function getVisibleSongs() {
   const query = normalizeSearch(state.query);
-  const songs = getSongsByProducer(state.activeProducer).filter((song) => {
+  const songs = getPublicSongsByProducer(state.activeProducer).filter((song) => {
     if (state.favoritesOnly && !state.favorites.has(song.id)) {
       return false;
     }
@@ -3824,9 +4513,14 @@ function addSongToWeeklySelections(songId) {
 
 function ensureSelectedSong() {
   const visibleSongs = getVisibleSongs();
-  const selectedIsVisible = visibleSongs.some((song) => song.id === state.selectedSongId);
+  const selectableSongs = [
+    ...visibleSongs,
+    ...getRecentAddedSongs(8),
+    ...getWeeklySelectedSongs()
+  ];
+  const selectedIsVisible = selectableSongs.some((song) => song.id === state.selectedSongId);
 
-  if (!visibleSongs.length) {
+  if (!selectableSongs.length) {
     state.selectedSongId = null;
     return;
   }
@@ -3944,6 +4638,7 @@ function renderMemberLoginOverlay() {
 function renderHeroStats() {
   const eliteSummary = getProducerSummary("elite");
   const alagoaSummary = getProducerSummary("alagoa");
+  const publicCatalogTotal = eliteSummary.total + alagoaSummary.total;
   const weeklySelector = getWeeklySelectorInfo();
   const weeklySelectorLeftControl = isAdminUser()
     ? `<button class="icon-button weekly-selector-arrow" type="button" data-shift-weekly-selector="-1" aria-label="Voltar escala">
@@ -3969,7 +4664,7 @@ function renderHeroStats() {
     </article>
     <article class="stat-card">
       <span class="eyebrow">Catalogo total</span>
-      <strong>${state.catalog.length}</strong>
+      <strong>${publicCatalogTotal}</strong>
       <span class="muted-copy">Todas as musicas disponiveis neste navegador</span>
     </article>
     <article class="stat-card stat-card-centered">
@@ -4245,7 +4940,533 @@ function toggleLyricsMinistryMode() {
 function closeLyricsModal() {
   state.lyricsMinistryMode = false;
   state.selectedSongId = null;
+  destroyMultitrackPlayer();
   renderAll();
+}
+
+function buildMultitrackScaleMarkup() {
+  const scaleValues = [12, 6, 0, -12, -24, -48, -72, -100];
+
+  return scaleValues.map((value) => {
+    const offset = ((MULTITRACK_DB_MAX - value) / (MULTITRACK_DB_MAX - MULTITRACK_DB_MIN)) * 100;
+    return `
+      <span class="multitrack-scale-mark" style="top:${offset}%;">
+        ${value > 0 ? `+${value}` : value}
+      </span>
+    `;
+  }).join("");
+}
+
+function buildMultitrackPlayerMarkup(song) {
+  const audioTracks = getSongAudioTracks(song);
+  const readyTracks = MULTITRACK_SLOTS.filter((slot) => Boolean(resolveSongAudioTrackUrl(audioTracks[slot.id])));
+  const hasTracks = readyTracks.length > 0;
+  const showAdminUploadShortcut = isAdminUser();
+  const adminUploadLabel = hasTracks ? "Trocar MP3s" : "Carregar MP3s";
+
+  return `
+    <section class="multitrack-card ${hasTracks ? "" : "is-empty"}" data-multitrack-player="${escapeHtml(song.id)}">
+      <div class="multitrack-topbar">
+        <div class="multitrack-copy">
+          <p class="eyebrow">Player MP3</p>
+          <h5>Multitracks da musica</h5>
+        </div>
+
+        <div class="multitrack-transport-actions">
+          ${showAdminUploadShortcut ? `
+            <button class="secondary-button" type="button" data-open-song-assets="${escapeHtml(song.id)}">
+              ${adminUploadLabel}
+            </button>
+            <button class="secondary-button" type="button" data-clear-song-tracks="${escapeHtml(song.id)}">
+              Limpar MP3s
+            </button>
+          ` : ""}
+          <button class="action-button" type="button" data-player-play="true" ${hasTracks ? "" : "disabled"}>Play</button>
+          <button class="secondary-button" type="button" data-player-pause="true" ${hasTracks ? "" : "disabled"}>Pause</button>
+        </div>
+      </div>
+
+      <div class="multitrack-progress-row">
+        <span class="multitrack-time" data-player-current-time>00:00</span>
+        <input class="multitrack-progress" type="range" min="0" max="1" step="0.01" value="0" data-player-progress ${hasTracks ? "" : "disabled"}>
+        <span class="multitrack-time" data-player-duration>00:00</span>
+      </div>
+
+      <div class="multitrack-strip-row">
+        ${MULTITRACK_SLOTS.map((slot) => {
+          const track = audioTracks[slot.id];
+          const isReady = Boolean(resolveSongAudioTrackUrl(track));
+
+          return `
+            <article class="multitrack-strip ${isReady ? "" : "is-disabled"}" data-track-slot="${escapeHtml(slot.id)}">
+              <div class="multitrack-strip-head">
+                <div class="multitrack-strip-label">${escapeHtml(slot.label)}</div>
+                <div class="multitrack-db-readout" data-track-db-label="${escapeHtml(slot.id)}">0 dB</div>
+              </div>
+
+              <div class="multitrack-strip-body">
+                <span class="multitrack-range-edge">-100 dB</span>
+
+                <div class="multitrack-fader-shell">
+                  <input
+                    class="multitrack-fader"
+                    type="range"
+                    min="${MULTITRACK_DB_MIN}"
+                    max="${MULTITRACK_DB_MAX}"
+                    step="1"
+                    value="0"
+                    data-track-fader="${escapeHtml(slot.id)}"
+                    ${isReady ? "" : "disabled"}
+                  >
+                </div>
+
+                <span class="multitrack-range-edge">+12 dB</span>
+              </div>
+            </article>
+          `;
+        }).join("")}
+      </div>
+
+      ${hasTracks ? "" : `
+        <div class="multitrack-empty-state">
+          <strong>Player aguardando as tracks MP3.</strong>
+          <p>Use o botao de carregar MP3s para subir as faixas dessa musica e tocar aqui no app.</p>
+        </div>
+      `}
+    </section>
+  `;
+}
+
+function getMultitrackReferenceTrack() {
+  if (!multitrackPlayer?.tracks?.size) {
+    return null;
+  }
+
+  const referenceTrack = multitrackPlayer.tracks.get(multitrackPlayer.referenceSlotId);
+
+  if (referenceTrack?.ready) {
+    return referenceTrack;
+  }
+
+  for (const track of multitrackPlayer.tracks.values()) {
+    if (track.ready) {
+      return track;
+    }
+  }
+
+  return null;
+}
+
+function stopMultitrackSources() {
+  for (const track of multitrackPlayer.tracks.values()) {
+    if (!track?.sourceNode) {
+      continue;
+    }
+
+    try {
+      track.sourceNode.onended = null;
+      track.sourceNode.stop();
+    } catch (_error) {
+      // ignora
+    }
+
+    try {
+      track.sourceNode.disconnect();
+    } catch (_error) {
+      // ignora
+    }
+
+    track.sourceNode = null;
+  }
+}
+
+function getMultitrackPlaybackTime() {
+  if (!multitrackPlayer.isPlaying || !multitrackPlayer.context) {
+    return multitrackPlayer.currentTime || 0;
+  }
+
+  return Math.min(
+    multitrackPlayer.duration || 0,
+    Math.max(0, (multitrackPlayer.context.currentTime || 0) - (multitrackPlayer.startedAt || 0))
+  );
+}
+
+function restartMultitrackPlaybackFromCurrentTime() {
+  const readyTracks = [...multitrackPlayer.tracks.values()].filter((track) => track.ready && track.buffer && track.gainNode);
+
+  if (!readyTracks.length || !multitrackPlayer.context) {
+    return false;
+  }
+
+  stopMultitrackSources();
+
+  const safeDuration = Math.max(multitrackPlayer.duration || 0, 0);
+  const startOffset = Math.max(0, Math.min(multitrackPlayer.currentTime || 0, Math.max(safeDuration - 0.02, 0)));
+  const contextTime = (multitrackPlayer.context.currentTime || 0) + 0.03;
+
+  for (const track of readyTracks) {
+    const sourceNode = multitrackPlayer.context.createBufferSource();
+    sourceNode.buffer = track.buffer;
+    sourceNode.connect(track.gainNode);
+    sourceNode.start(contextTime, startOffset);
+    track.sourceNode = sourceNode;
+  }
+
+  multitrackPlayer.startedAt = contextTime - startOffset;
+  multitrackPlayer.currentTime = startOffset;
+  return true;
+}
+
+function destroyMultitrackPlayer() {
+  if (multitrackPlayer.rafId) {
+    window.cancelAnimationFrame(multitrackPlayer.rafId);
+  }
+
+  if (multitrackPlayer.syncTimerId) {
+    window.clearInterval(multitrackPlayer.syncTimerId);
+  }
+
+  stopMultitrackSources();
+
+  for (const track of multitrackPlayer.tracks.values()) {
+    try {
+      track.gainNode?.disconnect();
+    } catch (_error) {
+      // ignora
+    }
+  }
+
+  if (multitrackPlayer.context) {
+    multitrackPlayer.context.close().catch(() => {
+      // ignora
+    });
+  }
+
+  multitrackPlayer = createEmptyMultitrackPlayerState();
+}
+
+function updateMultitrackTrackOutput(slotId) {
+  const track = multitrackPlayer.tracks.get(slotId);
+
+  if (!track) {
+    return;
+  }
+
+  const shouldBeAudible = track.ready;
+  const targetGain = shouldBeAudible ? convertDbToGain(track.db) : 0;
+
+  track.effectiveGain = targetGain;
+
+  if (track.gainNode) {
+    try {
+      const contextTime = multitrackPlayer.context?.currentTime || 0;
+      const safeCurrentValue = Number.isFinite(track.gainNode.gain.value) ? track.gainNode.gain.value : targetGain;
+      track.gainNode.gain.cancelScheduledValues(contextTime);
+      track.gainNode.gain.setValueAtTime(safeCurrentValue, contextTime);
+      track.gainNode.gain.linearRampToValueAtTime(targetGain, contextTime + 0.07);
+    } catch (_error) {
+      track.gainNode.gain.value = targetGain;
+    }
+  }
+}
+
+function updateAllMultitrackOutputs() {
+  for (const slot of MULTITRACK_SLOTS) {
+    updateMultitrackTrackOutput(slot.id);
+  }
+}
+
+function syncMultitrackTracks(force = false) {
+  if (force && multitrackPlayer.isPlaying) {
+    restartMultitrackPlaybackFromCurrentTime();
+  }
+}
+
+function sampleTrackMeterLevel(track) {
+  return 0;
+}
+
+function refreshMultitrackPlayerUi() {
+  const playerRoot = elements.lyricsViewer?.querySelector("[data-multitrack-player]");
+
+  if (!playerRoot || playerRoot.getAttribute("data-multitrack-player") !== multitrackPlayer.songId) {
+    return;
+  }
+
+  const currentTimeLabel = playerRoot.querySelector("[data-player-current-time]");
+  const durationLabel = playerRoot.querySelector("[data-player-duration]");
+  const progressInput = playerRoot.querySelector("[data-player-progress]");
+  const playButton = playerRoot.querySelector("[data-player-play]");
+  const pauseButton = playerRoot.querySelector("[data-player-pause]");
+
+  if (currentTimeLabel) {
+    currentTimeLabel.textContent = formatPlayerTime(multitrackPlayer.currentTime);
+  }
+
+  if (durationLabel) {
+    durationLabel.textContent = formatPlayerTime(multitrackPlayer.duration);
+  }
+
+  if (progressInput instanceof HTMLInputElement) {
+    progressInput.max = String(Math.max(multitrackPlayer.duration || 0, 1));
+    progressInput.value = String(Math.min(multitrackPlayer.currentTime || 0, multitrackPlayer.duration || 0));
+  }
+
+  if (playButton instanceof HTMLButtonElement) {
+    playButton.disabled = !getMultitrackReferenceTrack() || multitrackPlayer.isPlaying;
+  }
+
+  if (pauseButton instanceof HTMLButtonElement) {
+    pauseButton.disabled = !getMultitrackReferenceTrack() || !multitrackPlayer.isPlaying;
+  }
+
+  for (const track of multitrackPlayer.tracks.values()) {
+    const strip = playerRoot.querySelector(`[data-track-slot="${track.slotId}"]`);
+
+    if (!strip) {
+      continue;
+    }
+
+    strip.classList.toggle("is-disabled", !track.ready);
+    strip.classList.toggle("is-loading", Boolean(track.loading));
+
+    const muteButton = strip.querySelector(`[data-track-mute="${track.slotId}"]`);
+    const soloButton = strip.querySelector(`[data-track-solo="${track.slotId}"]`);
+    const dbLabel = strip.querySelector(`[data-track-db-label="${track.slotId}"]`);
+    const fader = strip.querySelector(`[data-track-fader="${track.slotId}"]`);
+    const meterFill = strip.querySelector(`[data-track-meter="${track.slotId}"]`);
+
+    if (muteButton instanceof HTMLButtonElement) {
+      muteButton.setAttribute("aria-pressed", track.muted ? "true" : "false");
+      muteButton.classList.toggle("is-active", track.muted);
+    }
+
+    if (soloButton instanceof HTMLButtonElement) {
+      soloButton.setAttribute("aria-pressed", track.solo ? "true" : "false");
+      soloButton.classList.toggle("is-active", track.solo);
+    }
+
+    if (dbLabel) {
+      dbLabel.textContent = track.loading
+        ? "Carregando..."
+        : track.ready
+          ? formatDbValue(track.db)
+          : "Sem MP3";
+    }
+
+    if (fader instanceof HTMLInputElement) {
+      fader.value = String(track.db);
+      fader.disabled = !track.ready;
+    }
+
+    if (meterFill instanceof HTMLElement) {
+      meterFill.style.height = `${Math.round(sampleTrackMeterLevel(track) * 100)}%`;
+    }
+  }
+}
+
+function startMultitrackPlayerLoops() {
+  if (multitrackPlayer.rafId) {
+    window.cancelAnimationFrame(multitrackPlayer.rafId);
+  }
+
+  if (multitrackPlayer.syncTimerId) {
+    window.clearInterval(multitrackPlayer.syncTimerId);
+  }
+
+  const tick = () => {
+    if (multitrackPlayer.isPlaying) {
+      multitrackPlayer.currentTime = getMultitrackPlaybackTime();
+
+      if (multitrackPlayer.duration && multitrackPlayer.currentTime >= multitrackPlayer.duration - 0.05) {
+        pauseMultitrackPlayer({ snapToEnd: true });
+      }
+    }
+
+    refreshMultitrackPlayerUi();
+    multitrackPlayer.rafId = window.requestAnimationFrame(tick);
+  };
+
+  multitrackPlayer.rafId = window.requestAnimationFrame(tick);
+}
+
+async function playMultitrackPlayer() {
+  const readyTracks = [...multitrackPlayer.tracks.values()].filter((track) => track.ready && track.buffer && track.gainNode);
+
+  if (!readyTracks.length) {
+    setFlash("Essas tracks ainda nao ficaram prontas para tocar. Aguarde o carregamento terminar.", "error");
+    return;
+  }
+
+  if (multitrackPlayer.context?.state === "suspended") {
+    try {
+      await multitrackPlayer.context.resume();
+    } catch (_error) {
+      // ignora
+    }
+  }
+
+  try {
+    const playbackStarted = restartMultitrackPlaybackFromCurrentTime();
+
+    if (!playbackStarted) {
+      throw new Error("Nenhuma track conseguiu tocar.");
+    }
+
+    multitrackPlayer.isPlaying = true;
+    refreshMultitrackPlayerUi();
+  } catch (error) {
+    console.error("Falha ao tocar as tracks MP3.", error);
+    setFlash("Nao consegui tocar as tracks MP3 agora. Confira se os arquivos foram enviados corretamente.", "error");
+  }
+}
+
+function pauseMultitrackPlayer(options = {}) {
+  const {
+    snapToEnd = false
+  } = options;
+  multitrackPlayer.currentTime = snapToEnd
+    ? multitrackPlayer.duration
+    : getMultitrackPlaybackTime();
+  stopMultitrackSources();
+
+  multitrackPlayer.isPlaying = false;
+  refreshMultitrackPlayerUi();
+}
+
+function seekMultitrackPlayer(nextTimeInSeconds) {
+  const normalizedTime = Number.isFinite(Number(nextTimeInSeconds))
+    ? Math.max(0, Math.min(multitrackPlayer.duration || 0, Number(nextTimeInSeconds)))
+    : 0;
+
+  multitrackPlayer.currentTime = normalizedTime;
+
+  if (multitrackPlayer.isPlaying) {
+    restartMultitrackPlaybackFromCurrentTime();
+  }
+
+  refreshMultitrackPlayerUi();
+}
+
+function toggleMultitrackMute(slotId) {
+  const track = multitrackPlayer.tracks.get(cleanText(slotId));
+
+  if (!track) {
+    return;
+  }
+
+  track.muted = !track.muted;
+  updateAllMultitrackOutputs();
+  refreshMultitrackPlayerUi();
+}
+
+function toggleMultitrackSolo(slotId) {
+  const track = multitrackPlayer.tracks.get(cleanText(slotId));
+
+  if (!track) {
+    return;
+  }
+
+  track.solo = !track.solo;
+  updateAllMultitrackOutputs();
+  refreshMultitrackPlayerUi();
+}
+
+function setMultitrackTrackDb(slotId, dbValue) {
+  const track = multitrackPlayer.tracks.get(cleanText(slotId));
+
+  if (!track) {
+    return;
+  }
+
+  track.db = Math.max(MULTITRACK_DB_MIN, Math.min(MULTITRACK_DB_MAX, Number(dbValue) || 0));
+  updateMultitrackTrackOutput(track.slotId);
+  refreshMultitrackPlayerUi();
+}
+
+function hydrateMultitrackPlayer(song) {
+  destroyMultitrackPlayer();
+
+  if (!songHasMultitrackPlayer(song)) {
+    return;
+  }
+
+  const audioTracks = getSongAudioTracks(song);
+  const nextPlayer = createEmptyMultitrackPlayerState();
+  const audioContext = createMultitrackAudioContext();
+
+  if (!audioContext) {
+    setFlash("Seu navegador nao conseguiu abrir o player MP3 agora.", "error");
+    return;
+  }
+
+  nextPlayer.songId = cleanText(song.id);
+  nextPlayer.context = audioContext;
+  nextPlayer.instanceToken = `${nextPlayer.songId}-${Date.now()}`;
+  multitrackPlayer = nextPlayer;
+
+  for (const slot of MULTITRACK_SLOTS) {
+    const trackUrl = resolveSongAudioTrackUrl(audioTracks[slot.id]);
+    const gainNode = audioContext.createGain();
+    gainNode.gain.value = 1;
+    gainNode.connect(audioContext.destination);
+
+    const trackState = {
+      slotId: slot.id,
+      label: slot.label,
+      ready: false,
+      loading: Boolean(trackUrl),
+      url: trackUrl,
+      buffer: null,
+      db: 0,
+      muted: false,
+      solo: false,
+      effectiveGain: 1,
+      sourceNode: null,
+      gainNode,
+      seed: Math.random() * Math.PI * 2
+    };
+
+    if (trackUrl) {
+      fetchAndDecodeMultitrackBuffer(trackUrl, audioContext)
+        .then((audioBuffer) => {
+          if (multitrackPlayer.instanceToken !== nextPlayer.instanceToken) {
+            return;
+          }
+
+          trackState.buffer = audioBuffer;
+          trackState.ready = true;
+          trackState.loading = false;
+          multitrackPlayer.duration = Math.max(multitrackPlayer.duration || 0, audioBuffer.duration || 0);
+
+          if (!multitrackPlayer.referenceSlotId) {
+            multitrackPlayer.referenceSlotId = slot.id;
+          }
+
+          updateMultitrackTrackOutput(slot.id);
+          multitrackPlayer.ready = Boolean(getMultitrackReferenceTrack());
+          refreshMultitrackPlayerUi();
+        })
+        .catch((error) => {
+          console.error(`Falha ao carregar a track ${slot.label}.`, error);
+
+          if (multitrackPlayer.instanceToken !== nextPlayer.instanceToken) {
+            return;
+          }
+
+          trackState.ready = false;
+          trackState.loading = false;
+          refreshMultitrackPlayerUi();
+        });
+    }
+
+    nextPlayer.tracks.set(slot.id, trackState);
+  }
+
+  multitrackPlayer.ready = Boolean(getMultitrackReferenceTrack());
+  updateAllMultitrackOutputs();
+  startMultitrackPlayerLoops();
+  refreshMultitrackPlayerUi();
 }
 
 function renderSongViewer() {
@@ -4268,6 +5489,7 @@ function renderSongViewer() {
   }
 
   if (!song) {
+    destroyMultitrackPlayer();
     lyricsModal.classList.add("is-hidden");
     lyricsModal.setAttribute("aria-hidden", "true");
     lyricsViewer.innerHTML = "";
@@ -4275,8 +5497,6 @@ function renderSongViewer() {
     return;
   }
 
-  const youtubeLink = cleanText(song.youtubeUrl);
-  const hasYoutubeLink = Boolean(youtubeLink);
   const favorite = isFavorite(song.id);
   const weeklySelected = isWeeklySelected(song.id);
   const producerName = formatProducerName(song.producer);
@@ -4301,45 +5521,14 @@ function renderSongViewer() {
           <p class="viewer-link-empty">${escapeHtml(producerName)}</p>
         </div>
 
-        <div class="viewer-link-panel">
-          <span class="viewer-link-label">Link do YouTube</span>
-          ${
-            hasYoutubeLink
-              ? `
-                <a class="viewer-link-value" href="${escapeHtml(youtubeLink)}" target="_blank" rel="noreferrer">
-                  ${escapeHtml(youtubeLink)}
-                </a>
-              `
-              : `
-                <p class="viewer-link-empty">Link do YouTube ainda nao cadastrado.</p>
-              `
-          }
-        </div>
-
         <div class="action-row">
           <button
-            class="action-button"
-            type="button"
-            data-open-youtube="${escapeHtml(song.id)}"
-            ${hasYoutubeLink ? "" : "disabled"}
-          >
-            Abrir YouTube
-          </button>
-          <button
-            class="secondary-button favorite-action-button ${favorite ? "is-active" : ""}"
+            class="action-button favorite-action-button ${favorite ? "is-active" : ""}"
             type="button"
             data-toggle-favorite="${escapeHtml(song.id)}"
             aria-pressed="${favorite ? "true" : "false"}"
           >
             ${favorite ? "Remover dos favoritos" : "Favoritar"}
-          </button>
-          <button
-            class="secondary-button"
-            type="button"
-            data-share-song="${escapeHtml(song.id)}"
-            ${hasYoutubeLink ? "" : "disabled"}
-          >
-            Compartilhar
           </button>
           <button
             class="secondary-button ${weeklySelected ? "is-active" : ""}"
@@ -4380,6 +5569,8 @@ function renderSongViewer() {
           </div>
         ` : ""}
 
+        ${!ministryMode ? buildMultitrackPlayerMarkup(song) : ""}
+
         <div class="lyrics-panel">
           ${lyricsMarkup}
         </div>
@@ -4390,6 +5581,34 @@ function renderSongViewer() {
   lyricsModal.classList.remove("is-hidden");
   lyricsModal.setAttribute("aria-hidden", "false");
   document.body.style.overflow = "hidden";
+
+  if (songHasMultitrackPlayer(song) && !ministryMode) {
+    hydrateMultitrackPlayer(song);
+  } else {
+    destroyMultitrackPlayer();
+  }
+}
+
+function openSelectedSongTrackBatchPicker(songId) {
+  const normalizedSongId = cleanText(songId);
+
+  if (!normalizedSongId) {
+    return;
+  }
+
+  if (!isAdminUser()) {
+    setFlash("Entre como administrador para enviar as tracks da musica.", "error");
+    return;
+  }
+
+  if (!(elements.trackBatchInput instanceof HTMLInputElement)) {
+    setFlash("Nao encontrei o seletor de tracks agora.", "error");
+    return;
+  }
+
+  state.trackBatchTargetSongId = normalizedSongId;
+  elements.trackBatchInput.value = "";
+  elements.trackBatchInput.click();
 }
 
 function renderAdminAuthView() {
@@ -4603,6 +5822,72 @@ function buildCoverUploadFieldMarkup(previewCoverUrl, title, artist) {
   `;
 }
 
+function buildAudioTracksUploadFieldMarkup(songLike = {}) {
+  const audioTracks = getSongAudioTracks(songLike);
+  const uploadAvailable = isCloudModeActive();
+
+  return `
+    <div class="field-block full">
+      <div class="admin-audio-block">
+        <div class="admin-audio-block-head">
+          <div>
+            <span>Player MP3</span>
+            <p class="helper-text">Envie as 6 faixas alinhadas no mesmo ponto para tocar tudo sincronizado.</p>
+          </div>
+          <button class="secondary-button" type="button" data-open-track-batch="true" ${uploadAvailable ? "" : "disabled"}>
+            Carregar todas as tracks
+          </button>
+        </div>
+
+        <p class="helper-text admin-audio-batch-note">
+          O app tenta encaixar automaticamente pelos nomes: BACK, TECLADOS, DRUMS, GTR, MUSICA e CLICK E GUIA.
+        </p>
+
+        <div class="admin-audio-grid">
+          ${MULTITRACK_SLOTS.map((slot) => {
+            const track = audioTracks[slot.id];
+            const trackUrl = resolveSongAudioTrackUrl(track);
+            const draftFile = getAdminTrackDraftFile(slot.id);
+            const isDraftReady = draftFile instanceof File;
+            const isReady = Boolean(trackUrl) || isDraftReady;
+
+            return `
+              <div class="admin-audio-item ${isReady ? "is-ready" : ""} ${isDraftReady ? "has-draft" : ""}" data-track-upload-slot="${escapeHtml(slot.id)}">
+                <div class="admin-audio-item-head">
+                  <strong>${escapeHtml(slot.label)}</strong>
+                  <span class="status-pill ${isReady ? "is-ready" : ""}" data-track-status="${escapeHtml(slot.id)}">
+                    ${isDraftReady ? "Pronto para enviar" : isReady ? "MP3 pronto" : "Sem MP3"}
+                  </span>
+                </div>
+
+                <input
+                  class="admin-input admin-file-input"
+                  type="file"
+                  accept=".mp3,audio/mpeg"
+                  data-track-upload="${escapeHtml(slot.id)}"
+                  ${uploadAvailable ? "" : "disabled"}
+                >
+
+                <p class="helper-text" data-track-hint="${escapeHtml(slot.id)}">
+                  ${uploadAvailable
+                    ? (isDraftReady
+                      ? "Arquivo separado. Agora e so salvar a musica."
+                      : (isReady ? "Escolha outro MP3 se quiser substituir essa faixa." : "Envie o MP3 dessa faixa."))
+                    : "Ative a nuvem para subir e sincronizar as tracks entre os aparelhos."}
+                </p>
+
+                <span class="helper-text admin-audio-file-name" data-track-file-name="${escapeHtml(slot.id)}">
+                  ${isDraftReady ? escapeHtml(draftFile.name) : isReady ? "Track salva na nuvem" : "Nenhum arquivo escolhido"}
+                </span>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function buildMemberAccountsListMarkup() {
   if (!state.memberAccounts.length) {
     return `
@@ -4788,6 +6073,8 @@ function buildCreateSongFormMarkup() {
             <textarea id="song-lyrics" class="admin-textarea" name="lyrics" placeholder="Escreva aqui a letra da musica do seu jeito..."></textarea>
           </div>
 
+          ${buildAudioTracksUploadFieldMarkup()}
+
           ${buildCoverUploadFieldMarkup(previewCoverUrl, "Nova musica", "Ministerio")}
 
           <div class="field-block full inline-actions">
@@ -4846,6 +6133,8 @@ function buildAssetEditorMarkup(editingSong) {
           <label for="song-lyrics">Letra da musica</label>
           <textarea id="song-lyrics" class="admin-textarea" name="lyrics" placeholder="Escreva aqui a letra da musica do seu jeito...">${escapeHtml(editingSong.lyrics || "")}</textarea>
         </div>
+
+        ${buildAudioTracksUploadFieldMarkup(editingSong)}
 
         ${buildCoverUploadFieldMarkup(previewCoverUrl, editingSong.title || "Musica", editingSong.artist || "Ministerio")}
 
@@ -4994,6 +6283,7 @@ async function openAdminModal(mode = "create") {
   state.adminFilter = "";
   setAdminProducerFilter(state.activeProducer);
   resetAdminCoverDraft();
+  resetAdminTrackDrafts();
 
   renderAdminViews();
   elements.adminModal.classList.remove("is-hidden");
@@ -5023,6 +6313,7 @@ function closeAdminModal() {
   elements.adminModal.classList.add("is-hidden");
   elements.adminModal.setAttribute("aria-hidden", "true");
   document.body.style.overflow = "";
+  resetAdminTrackDrafts();
 }
 
 function focusAdminSongForm() {
@@ -5052,11 +6343,12 @@ function focusAdminSongForm() {
 function resetSongForm() {
   state.editingSongId = null;
   resetAdminCoverDraft();
+  resetAdminTrackDrafts();
   renderAdminDashboardView();
   focusAdminSongForm();
 }
 
-async function saveSongFromForm(formData) {
+async function saveSongFromForm(formData, formElement = null) {
   const songId = cleanText(formData.get("song-id"));
   const currentSong = songId ? state.catalog.find((song) => song.id === songId) : null;
   const requestedProducer = cleanText(formData.get("producer"));
@@ -5070,12 +6362,15 @@ async function saveSongFromForm(formData) {
   const currentCoverUrl = cleanText(currentSong?.coverUrl);
   const currentCoverFileId = cleanText(currentSong?.coverFileId);
   const currentCoverAssetId = cleanText(currentSong?.coverAssetId);
+  const currentAudioTracks = getSongAudioTracks(currentSong);
   const currentResolvedCoverUrl = resolveSongCoverUrl(currentSong);
   const draftCoverUrl = state.adminCoverDraftChanged
     ? state.adminCoverDraftUrl
     : currentResolvedCoverUrl;
   const parsedYouTube = parseYouTubeInput(youtubeUrl);
   const nextSongId = songId || buildId();
+  const selectedTrackFiles = getAdminTrackFileMap(formElement);
+  const selectedTrackCount = Object.keys(selectedTrackFiles).length;
 
   if (!artist || !title) {
     setFlash("Preencha artista e titulo da musica.", "error");
@@ -5099,10 +6394,20 @@ async function saveSongFromForm(formData) {
     }
   }
 
+  if (selectedTrackCount && !isCloudModeActive()) {
+    setFlash("Ative a nuvem para subir as tracks MP3 e sincronizar no PC e no celular.", "error");
+    return;
+  }
+
   try {
     let finalCoverUrl = currentCoverUrl;
     let finalCoverFileId = currentCoverFileId;
     let finalCoverAssetId = currentCoverAssetId;
+    let workingSong = currentSong ? createSongRecord(currentSong) : null;
+    const shouldResetSelectedSongTracks = Boolean(currentSong?.id) && selectedTrackCount >= MULTITRACK_SLOTS.length;
+    const nextAudioTracks = shouldResetSelectedSongTracks
+      ? createEmptyAudioTracks()
+      : normalizeSongAudioTracks(currentAudioTracks);
 
     if (isCloudModeActive()) {
       if (state.adminCoverDraftChanged) {
@@ -5122,6 +6427,53 @@ async function saveSongFromForm(formData) {
       }
 
       finalCoverAssetId = "";
+
+      if (!currentSong && selectedTrackCount) {
+        workingSong = await saveSongToCloud(createSongRecord({
+          id: nextSongId,
+          producer,
+          artist,
+          title,
+          lyrics,
+          source,
+          notes,
+          coverUrl: finalCoverUrl,
+          coverFileId: finalCoverFileId,
+          coverAssetId: finalCoverAssetId,
+          audioTracks: createEmptyAudioTracks(),
+          youtubeUrl: parsedYouTube.canonicalUrl,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        }));
+      }
+
+      if (shouldResetSelectedSongTracks) {
+        setFlash(`Limpando os MP3s antigos de ${title} para subir o lote novo...`, "success");
+        const clearedSong = await resetSongTracksInCloud(workingSong?.id || nextSongId);
+        if (clearedSong?.id) {
+          workingSong = clearedSong;
+        }
+      }
+
+      for (const slot of MULTITRACK_SLOTS) {
+        const selectedTrackFile = selectedTrackFiles[slot.id];
+
+        if (!(selectedTrackFile instanceof File)) {
+          continue;
+        }
+
+        setFlash(`Enviando ${slot.label.toLowerCase()} para a nuvem...`, "success");
+        const uploadedTrack = await uploadStemTrackToCloud(workingSong?.id || nextSongId, producer, slot.id, selectedTrackFile);
+        nextAudioTracks[slot.id] = {
+          label: slot.label,
+          url: uploadedTrack.url,
+          fileId: uploadedTrack.fileId
+        };
+
+        if (uploadedTrack.song?.id) {
+          workingSong = uploadedTrack.song;
+        }
+      }
     } else if (cleanText(draftCoverUrl).startsWith("data:image/")) {
       const assetId = currentCoverAssetId || nextSongId;
       const assetSaved = await saveCoverAsset(assetId, draftCoverUrl);
@@ -5143,7 +6495,7 @@ async function saveSongFromForm(formData) {
     }
 
     const nextSong = createSongRecord({
-      ...(currentSong || {}),
+      ...(workingSong || currentSong || {}),
       id: nextSongId,
       producer,
       artist,
@@ -5154,6 +6506,7 @@ async function saveSongFromForm(formData) {
       coverUrl: finalCoverUrl,
       coverFileId: finalCoverFileId,
       coverAssetId: finalCoverAssetId,
+      audioTracks: nextAudioTracks,
       youtubeUrl: parsedYouTube.canonicalUrl,
       createdAt: currentSong?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString()
@@ -5213,6 +6566,7 @@ async function saveSongFromForm(formData) {
     state.activeProducer = producer;
     state.editingSongId = songId && isAdminAssetsMode() ? persistedSong.id : null;
     resetAdminCoverDraft();
+    resetAdminTrackDrafts();
     saveCatalog();
     renderAll();
   } catch (error) {
@@ -5300,6 +6654,7 @@ function startEditingSong(songId) {
   setAdminProducerFilter(song.producer);
   state.editingSongId = song.id;
   resetAdminCoverDraft(resolveSongCoverUrl(song));
+  resetAdminTrackDrafts();
   renderAdminDashboardView();
   focusAdminSongForm();
   setFlash(`Editando: ${song.title}`, "success");
@@ -5712,6 +7067,42 @@ function bindEvents() {
       return;
     }
 
+    const playButton = event.target.closest("[data-player-play]");
+    if (playButton) {
+      playMultitrackPlayer();
+      return;
+    }
+
+    const pauseButton = event.target.closest("[data-player-pause]");
+    if (pauseButton) {
+      pauseMultitrackPlayer();
+      return;
+    }
+
+    const muteButton = event.target.closest("[data-track-mute]");
+    if (muteButton) {
+      toggleMultitrackMute(muteButton.dataset.trackMute);
+      return;
+    }
+
+    const soloButton = event.target.closest("[data-track-solo]");
+    if (soloButton) {
+      toggleMultitrackSolo(soloButton.dataset.trackSolo);
+      return;
+    }
+
+    const openSongAssetsButton = event.target.closest("[data-open-song-assets]");
+    if (openSongAssetsButton) {
+      openSelectedSongTrackBatchPicker(openSongAssetsButton.dataset.openSongAssets);
+      return;
+    }
+
+    const clearSongTracksButton = event.target.closest("[data-clear-song-tracks]");
+    if (clearSongTracksButton) {
+      clearSelectedSongTracks(clearSongTracksButton.dataset.clearSongTracks);
+      return;
+    }
+
     const openYouTubeButton = event.target.closest("[data-open-youtube]");
     if (openYouTubeButton) {
       openSongYouTube(openYouTubeButton.dataset.openYoutube);
@@ -5737,6 +7128,19 @@ function bindEvents() {
     }
 
     shareSongToWhatsApp(shareButton.dataset.shareSong);
+  });
+
+  elements.lyricsViewer.addEventListener("input", (event) => {
+    const progressInput = event.target.closest("[data-player-progress]");
+    if (progressInput instanceof HTMLInputElement) {
+      seekMultitrackPlayer(progressInput.value);
+      return;
+    }
+
+    const faderInput = event.target.closest("[data-track-fader]");
+    if (faderInput instanceof HTMLInputElement) {
+      setMultitrackTrackDb(faderInput.dataset.trackFader, faderInput.value);
+    }
   });
 
   elements.lyricsModal.addEventListener("click", (event) => {
@@ -5793,6 +7197,12 @@ function bindEvents() {
     const openCoverBatchButton = event.target.closest("[data-open-cover-batch]");
     if (openCoverBatchButton) {
       elements.coverBatchInput?.click();
+      return;
+    }
+
+    const openTrackBatchButton = event.target.closest("[data-open-track-batch]");
+    if (openTrackBatchButton) {
+      elements.trackBatchInput?.click();
       return;
     }
 
@@ -5864,7 +7274,7 @@ function bindEvents() {
 
     if (event.target.id === "admin-song-form") {
       event.preventDefault();
-      await saveSongFromForm(new FormData(event.target));
+      await saveSongFromForm(new FormData(event.target), event.target);
       return;
     }
 
@@ -5880,6 +7290,21 @@ function bindEvents() {
 
   elements.coverBatchInput?.addEventListener("change", async (event) => {
     await handleBatchCoverFiles(event.target.files);
+  });
+
+  elements.trackBatchInput?.addEventListener("change", async (event) => {
+    const targetSongId = cleanText(state.trackBatchTargetSongId);
+
+    if (targetSongId) {
+      state.trackBatchTargetSongId = "";
+      await handleSelectedSongTrackUpload(targetSongId, event.target.files);
+    } else {
+      handleBatchTrackFiles(event.target.files);
+    }
+
+    if (event.target instanceof HTMLInputElement) {
+      event.target.value = "";
+    }
   });
 
   elements.adminModal.addEventListener("input", (event) => {
@@ -5917,6 +7342,15 @@ function bindEvents() {
     if (event.target.id === "song-cover-file") {
       const [file] = event.target.files || [];
       await handleAdminCoverFileChange(file);
+      return;
+    }
+
+    const trackInput = event.target.closest("[data-track-upload]");
+    if (trackInput instanceof HTMLInputElement) {
+      const slotId = cleanText(trackInput.dataset.trackUpload);
+      const [file] = trackInput.files || [];
+      setAdminTrackDraftFile(slotId, file || null);
+      refreshAdminTrackDraftUi();
     }
   });
 
@@ -5987,3 +7421,4 @@ async function init() {
 init().catch((error) => {
   console.error("Falha ao iniciar o app.", error);
 });
+
