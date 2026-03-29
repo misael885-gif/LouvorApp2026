@@ -417,23 +417,40 @@ function songToRow_(song) {
   ];
 }
 
-function findSongRowIndex_(sheet, songId) {
-  const songs = readSongs_();
+function findSongRowMatch_(sheet, songId) {
+  const normalizedSongId = cleanValue(songId);
+  const lastRow = sheet.getLastRow();
 
-  for (var index = 0; index < songs.length; index += 1) {
-    if (songs[index].id === cleanValue(songId)) {
-      return index + 2;
+  if (!normalizedSongId || lastRow < 2) {
+    return null;
+  }
+
+  const idRows = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+
+  for (var index = 0; index < idRows.length; index += 1) {
+    if (cleanValue(idRows[index][0]) === normalizedSongId) {
+      const rowIndex = index + 2;
+      return {
+        rowIndex: rowIndex,
+        row: sheet.getRange(rowIndex, 1, 1, SONG_HEADERS.length).getValues()[0]
+      };
     }
   }
 
-  return 0;
+  return null;
+}
+
+function findSongRowIndex_(sheet, songId) {
+  const rowMatch = findSongRowMatch_(sheet, songId);
+  return rowMatch ? rowMatch.rowIndex : 0;
 }
 
 function upsertSong_(song) {
   const sheet = getSheet_();
   const nextSong = normalizeSong_(song);
-  const rowIndex = findSongRowIndex_(sheet, nextSong.id);
-  const currentSong = rowIndex ? rowToSong_(sheet.getRange(rowIndex, 1, 1, SONG_HEADERS.length).getValues()[0]) : null;
+  const rowMatch = findSongRowMatch_(sheet, nextSong.id);
+  const rowIndex = rowMatch ? rowMatch.rowIndex : 0;
+  const currentSong = rowMatch ? rowToSong_(rowMatch.row) : null;
 
   if (currentSong) {
     const currentCoverFileId = cleanValue(currentSong.coverFileId);

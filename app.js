@@ -3525,6 +3525,34 @@ function splitSongLabel(label) {
   };
 }
 
+function splitSongTitleVariant(title) {
+  const cleanedTitle = cleanText(title);
+
+  if (!cleanedTitle) {
+    return {
+      baseTitle: "",
+      variant: ""
+    };
+  }
+
+  const match = cleanedTitle.match(/^(.*?)(?:\s*\(([^)]+)\))$/);
+
+  if (!match) {
+    return {
+      baseTitle: cleanedTitle,
+      variant: ""
+    };
+  }
+
+  const baseTitle = cleanText(match[1]) || cleanedTitle;
+  const variant = cleanText(match[2]);
+
+  return {
+    baseTitle,
+    variant
+  };
+}
+
 function buildSongCatalogKey(input) {
   if (!input) {
     return "";
@@ -3532,9 +3560,12 @@ function buildSongCatalogKey(input) {
 
   const producer = cleanText(input.producer) === "alagoa" ? "alagoa" : "elite";
   const artist = cleanText(input.artist);
-  const title = cleanText(input.title);
+  const { baseTitle, variant } = splitSongTitleVariant(input.title);
+  const rawKey = variant
+    ? `${producer}-${artist}-${baseTitle}-variant-${variant}`
+    : `${producer}-${artist}-${baseTitle}`;
 
-  return normalizeBatchCoverKey(`${producer}-${artist}-${title}`);
+  return normalizeBatchCoverKey(rawKey);
 }
 
 function parseYouTubeInput(input) {
