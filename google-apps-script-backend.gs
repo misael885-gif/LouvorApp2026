@@ -17,12 +17,11 @@ const SONG_HEADERS = [
 const DEFAULT_ROTATION_NAMES = ["Daniela", "Mileide", "Tamires"];
 const DEFAULT_ROTATION_ANCHOR = "2026-03-23";
 const AUDIO_TRACK_SLOTS = [
-  { id: "drums", label: "DRUMS" },
   { id: "back", label: "BACK" },
-  { id: "keys", label: "TECLADOS" },
+  { id: "drums", label: "DRUMS" },
   { id: "gtr", label: "GTR" },
   { id: "full", label: "MUSICA" },
-  { id: "click", label: "CLICK E GUIA" }
+  { id: "keys", label: "TECLADOS" }
 ];
 
 function doGet(e) {
@@ -116,6 +115,17 @@ function doPost(e) {
       return jsonResponse({
         ok: true,
         song: clearedSong
+      });
+    }
+
+    if (action === "getTrackData") {
+      const trackData = getSongTrackData_(payload.songId, payload.slotId);
+      return jsonResponse({
+        ok: true,
+        fileId: trackData.fileId,
+        fileName: trackData.fileName,
+        mimeType: trackData.mimeType,
+        base64: trackData.base64
       });
     }
 
@@ -476,6 +486,13 @@ function deleteSong_(songId) {
     }
   });
 
+  const legacyClickTrack = currentSong.audioTracks && currentSong.audioTracks.click;
+  const legacyClickFileId = cleanValue(legacyClickTrack && legacyClickTrack.fileId);
+
+  if (legacyClickFileId) {
+    trashDriveFile_(legacyClickFileId);
+  }
+
   sheet.deleteRow(rowIndex);
 }
 
@@ -647,10 +664,60 @@ function resetSongTracks_(songId) {
     }
   });
 
+  const legacyClickTrack = currentSong.audioTracks && currentSong.audioTracks.click;
+  const legacyClickFileId = cleanValue(legacyClickTrack && legacyClickTrack.fileId);
+
+  if (legacyClickFileId) {
+    trashDriveFile_(legacyClickFileId);
+  }
+
+  if (folder) {
+    trashMatchingStemFiles_(folder, currentSong.producer, currentSong.id, "click");
+  }
+
   currentSong.audioTracks = createEmptyAudioTracks_();
   currentSong.updatedAt = new Date().toISOString();
   sheet.getRange(rowIndex, 1, 1, SONG_HEADERS.length).setValues([songToRow_(currentSong)]);
   return currentSong;
+}
+
+function getSongTrackData_(songId, slotId) {
+  const sheet = getSheet_();
+  const rowIndex = findSongRowIndex_(sheet, songId);
+
+  if (!rowIndex) {
+    throw new Error("Nao encontrei a musica para abrir o MP3.");
+  }
+
+  const currentSong = rowToSong_(sheet.getRange(rowIndex, 1, 1, SONG_HEADERS.length).getValues()[0]);
+  const normalizedSlotId = normalizeAudioTrackSlotId_(slotId);
+
+  if (!normalizedSlotId) {
+    throw new Error("Faixa de audio invalida.");
+  }
+
+  const audioTracks = normalizeAudioTracks_(currentSong.audioTracks);
+  const track = audioTracks[normalizedSlotId];
+  const fileId = cleanValue(track && track.fileId);
+
+  if (!fileId) {
+    throw new Error("Essa faixa ainda nao recebeu MP3.");
+  }
+
+  const file = DriveApp.getFileById(fileId);
+  const blob = file.getBlob();
+  const bytes = blob.getBytes();
+
+  if (!bytes || !bytes.length) {
+    throw new Error("O MP3 dessa faixa esta vazio.");
+  }
+
+  return {
+    fileId: fileId,
+    fileName: cleanValue(file.getName()),
+    mimeType: cleanValue(blob.getContentType()) || "audio/mpeg",
+    base64: Utilities.base64Encode(bytes)
+  };
 }
 
 function normalizeSong_(song) {
@@ -755,6 +822,15 @@ function reconcileAudioTracks_(currentAudioTracks, nextAudioTracks) {
       nextTrack.fileId = currentFileId;
     }
   });
+
+  const legacyClickTrack = currentAudioTracks && typeof currentAudioTracks === "object"
+    ? currentAudioTracks.click
+    : null;
+  const legacyClickFileId = cleanValue(legacyClickTrack && legacyClickTrack.fileId);
+
+  if (legacyClickFileId) {
+    trashDriveFile_(legacyClickFileId);
+  }
 
   return updatedTracks;
 }

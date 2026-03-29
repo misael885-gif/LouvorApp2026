@@ -58,12 +58,11 @@ const PRODUCERS = {
 };
 
 const MULTITRACK_SLOTS = [
-    { id: "drums", label: "DRUMS", channel: "1" },
-    { id: "back", label: "BACK", channel: "2" },
-    { id: "keys", label: "TECLADOS", channel: "3" },
-    { id: "gtr", label: "GTR", channel: "4" },
-    { id: "full", label: "MUSICA", channel: "5" },
-    { id: "click", label: "CLICK E GUIA", channel: "6" }
+    { id: "back", label: "BACK", channel: "1" },
+    { id: "drums", label: "DRUMS", channel: "2" },
+    { id: "gtr", label: "GTR", channel: "3" },
+    { id: "full", label: "MUSICA", channel: "4" },
+    { id: "keys", label: "TECLADOS", channel: "5" }
   ];
 
   const MULTITRACK_DB_MIN = -100;
@@ -72,6 +71,15 @@ const MULTITRACK_SLOTS = [
 
   function cleanTrackText(value) {
     return String(value ?? "").trim();
+  }
+
+  function getMultitrackSlotConfig(slotId) {
+    const normalizedSlotId = cleanTrackText(slotId);
+    return MULTITRACK_SLOTS.find((slot) => slot.id === normalizedSlotId) || null;
+  }
+
+  function getMultitrackFileNameHintText() {
+    return "Use BACK, DRUMS, GTR, MUSICA e TECLADOS.";
   }
 
   function createEmptyAudioTracks() {
@@ -945,8 +953,7 @@ const elements = {
   adminAuthView: document.querySelector("#admin-auth-view"),
   adminDashboardView: document.querySelector("#admin-dashboard-view"),
   adminFlash: document.querySelector("#admin-flash"),
-  coverBatchInput: document.querySelector("#cover-batch-input"),
-  trackBatchInput: document.querySelector("#track-batch-input")
+  coverBatchInput: document.querySelector("#cover-batch-input")
 };
 
 const state = {
@@ -971,7 +978,6 @@ const state = {
   adminProducerFilter: getInitialProducer(),
   adminFilter: "",
   adminTrackDraftFiles: {},
-  trackBatchTargetSongId: "",
   deletedCatalogKeys: new Set(),
   cloudAdminKey: "",
   rotationNames: [...WEEKLY_SELECTOR_ROTATION],
@@ -1000,6 +1006,7 @@ let sharedStateSyncTimerId = null;
 let cloudRefreshTimerId = null;
 let cloudRefreshPromise = null;
 let multitrackPlayer = createEmptyMultitrackPlayerState();
+let simpleTrackPlayerCleanup = [];
 
 function registerServiceWorker() {
   if (!("serviceWorker" in navigator) || location.protocol === "file:") {
@@ -1289,6 +1296,19 @@ function dataUrlToBlob(dataUrl) {
   }
 
   return new Blob([buffer], { type: mimeType });
+}
+
+function base64ToBlob(base64, mimeType = "application/octet-stream") {
+  const binary = atob(String(base64 || ""));
+  const buffer = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    buffer[index] = binary.charCodeAt(index);
+  }
+
+  return new Blob([buffer], {
+    type: cleanText(mimeType) || "application/octet-stream"
+  });
 }
 
 function getCoverExtensionFromUrl(url) {
@@ -1827,12 +1847,13 @@ async function requestCloudApi(action, payload = {}, options = {}) {
 
   const {
     method = "POST",
-    includeAdminKey = true
+    includeAdminKey = true,
+    timeoutMs = services.requestTimeoutMs
   } = options;
 
   const controller = typeof AbortController === "function" ? new AbortController() : null;
   const timeoutId = controller
-    ? window.setTimeout(() => controller.abort(), services.requestTimeoutMs)
+    ? window.setTimeout(() => controller.abort(), timeoutMs)
     : null;
 
   try {
@@ -2098,6 +2119,10 @@ async function refreshCloudState(options = {}) {
     return;
   }
 
+  if (isLyricsModalOpen()) {
+    return;
+  }
+
   if (cloudRefreshPromise) {
     return cloudRefreshPromise;
   }
@@ -2131,6 +2156,14 @@ async function refreshCloudState(options = {}) {
   })();
 
   return cloudRefreshPromise;
+}
+
+function isLyricsModalOpen() {
+  return Boolean(
+    elements.lyricsModal
+    && !elements.lyricsModal.classList.contains("is-hidden")
+    && cleanText(state.selectedSongId)
+  );
 }
 
 async function saveRotationSettingsToCloud(rotationNames, rotationAnchor) {
@@ -2728,11 +2761,6 @@ function resetAdminCoverDraft(url = "") {
 
 function resetAdminTrackDrafts() {
   state.adminTrackDraftFiles = {};
-  state.trackBatchTargetSongId = "";
-
-  if (elements.trackBatchInput instanceof HTMLInputElement) {
-    elements.trackBatchInput.value = "";
-  }
 }
 
 function getAdminTrackDraftFile(slotId) {
@@ -2782,10 +2810,6 @@ function inferStemSlotIdFromFileName(fileName) {
 
   if (/^musica$/.test(normalizedName) || /(musica completa|mix completa|completa|full|stereo|master)/.test(normalizedName)) {
     return "full";
-  }
-
-  if (/^click e guia$/.test(normalizedName) || /(click|guia|guide|cue)/.test(normalizedName)) {
-    return "click";
   }
 
   return "";
@@ -2928,7 +2952,7 @@ function handleBatchTrackFiles(fileList) {
   refreshAdminTrackDraftUi();
 
   if (!matchedSlots.size) {
-    setFlash("Nao consegui identificar essas tracks pelo nome do arquivo. Use BACK, TECLADOS, DRUMS, GTR, MUSICA e CLICK E GUIA.", "error");
+    setFlash(`Nao consegui identificar essas tracks pelo nome do arquivo. ${getMultitrackFileNameHintText()}`, "error");
     return;
   }
 
@@ -2977,7 +3001,7 @@ async function handleSelectedSongTrackUpload(songId, fileList) {
   } = buildMatchedTrackFilesResult(fileList);
 
   if (!matchedSlots.size) {
-    setFlash("Nao consegui identificar essas tracks pelo nome do arquivo. Use BACK, TECLADOS, DRUMS, GTR, MUSICA e CLICK E GUIA.", "error");
+    setFlash(`Nao consegui identificar essas tracks pelo nome do arquivo. ${getMultitrackFileNameHintText()}`, "error");
     return;
   }
 
@@ -4519,13 +4543,16 @@ function ensureSelectedSong() {
     ...getWeeklySelectedSongs()
   ];
   const selectedIsVisible = selectableSongs.some((song) => song.id === state.selectedSongId);
+  const selectedStillExists = state.selectedSongId
+    ? state.catalog.some((song) => song.id === state.selectedSongId)
+    : false;
 
-  if (!selectableSongs.length) {
+  if (!selectableSongs.length && !selectedStillExists) {
     state.selectedSongId = null;
     return;
   }
 
-  if (state.selectedSongId && !selectedIsVisible) {
+  if (state.selectedSongId && !selectedIsVisible && !selectedStillExists) {
     state.selectedSongId = null;
   }
 }
@@ -4940,6 +4967,7 @@ function toggleLyricsMinistryMode() {
 function closeLyricsModal() {
   state.lyricsMinistryMode = false;
   state.selectedSongId = null;
+  destroySimpleTrackPlayers();
   destroyMultitrackPlayer();
   renderAll();
 }
@@ -4961,66 +4989,66 @@ function buildMultitrackPlayerMarkup(song) {
   const audioTracks = getSongAudioTracks(song);
   const readyTracks = MULTITRACK_SLOTS.filter((slot) => Boolean(resolveSongAudioTrackUrl(audioTracks[slot.id])));
   const hasTracks = readyTracks.length > 0;
-  const showAdminUploadShortcut = isAdminUser();
-  const adminUploadLabel = hasTracks ? "Trocar MP3s" : "Carregar MP3s";
+  const showAdminUploadShortcut = isAdminUser() && isCloudModeActive();
 
   return `
     <section class="multitrack-card ${hasTracks ? "" : "is-empty"}" data-multitrack-player="${escapeHtml(song.id)}">
       <div class="multitrack-topbar">
         <div class="multitrack-copy">
           <p class="eyebrow">Player MP3</p>
-          <h5>Multitracks da musica</h5>
+          <h5>Faixas da musica</h5>
         </div>
 
         <div class="multitrack-transport-actions">
           ${showAdminUploadShortcut ? `
-            <button class="secondary-button" type="button" data-open-song-assets="${escapeHtml(song.id)}">
-              ${adminUploadLabel}
-            </button>
             <button class="secondary-button" type="button" data-clear-song-tracks="${escapeHtml(song.id)}">
               Limpar MP3s
             </button>
           ` : ""}
-          <button class="action-button" type="button" data-player-play="true" ${hasTracks ? "" : "disabled"}>Play</button>
-          <button class="secondary-button" type="button" data-player-pause="true" ${hasTracks ? "" : "disabled"}>Pause</button>
         </div>
       </div>
 
-      <div class="multitrack-progress-row">
-        <span class="multitrack-time" data-player-current-time>00:00</span>
-        <input class="multitrack-progress" type="range" min="0" max="1" step="0.01" value="0" data-player-progress ${hasTracks ? "" : "disabled"}>
-        <span class="multitrack-time" data-player-duration>00:00</span>
-      </div>
-
-      <div class="multitrack-strip-row">
+      <div class="simple-track-list" data-simple-track-player="${escapeHtml(song.id)}">
         ${MULTITRACK_SLOTS.map((slot) => {
           const track = audioTracks[slot.id];
-          const isReady = Boolean(resolveSongAudioTrackUrl(track));
+          const trackUrl = resolveSongAudioTrackUrl(track);
+          const isReady = Boolean(trackUrl);
 
           return `
-            <article class="multitrack-strip ${isReady ? "" : "is-disabled"}" data-track-slot="${escapeHtml(slot.id)}">
-              <div class="multitrack-strip-head">
-                <div class="multitrack-strip-label">${escapeHtml(slot.label)}</div>
-                <div class="multitrack-db-readout" data-track-db-label="${escapeHtml(slot.id)}">0 dB</div>
+            <article class="simple-track-player ${isReady ? "" : "is-disabled"}" data-simple-track-slot="${escapeHtml(slot.id)}">
+              <div class="simple-track-head">
+                <div class="simple-track-label">${escapeHtml(slot.label)}</div>
+                <div class="simple-track-head-actions">
+                  <div class="simple-track-status">${isReady ? "Pronto para tocar" : "Sem MP3"}</div>
+                  ${showAdminUploadShortcut ? `
+                    <label class="secondary-button simple-track-upload-button">
+                      ${isReady ? "Trocar MP3" : "Carregar MP3"}
+                      <input
+                        class="simple-track-upload-input"
+                        type="file"
+                        accept=".mp3,audio/mpeg"
+                        data-simple-track-upload="${escapeHtml(slot.id)}"
+                        data-simple-track-song-upload="${escapeHtml(song.id)}"
+                        hidden
+                      >
+                    </label>
+                  ` : ""}
+                </div>
               </div>
 
-              <div class="multitrack-strip-body">
-                <span class="multitrack-range-edge">-100 dB</span>
-
-                <div class="multitrack-fader-shell">
-                  <input
-                    class="multitrack-fader"
-                    type="range"
-                    min="${MULTITRACK_DB_MIN}"
-                    max="${MULTITRACK_DB_MAX}"
-                    step="1"
-                    value="0"
-                    data-track-fader="${escapeHtml(slot.id)}"
-                    ${isReady ? "" : "disabled"}
-                  >
-                </div>
-
-                <span class="multitrack-range-edge">+12 dB</span>
+              <div class="simple-track-row">
+                <audio
+                  class="simple-track-audio"
+                  data-simple-track-audio="${escapeHtml(slot.id)}"
+                  data-simple-track-song="${escapeHtml(song.id)}"
+                  controls
+                  controlsList="nodownload noplaybackrate"
+                  playsinline
+                  preload="metadata"
+                  ${isReady ? "" : "disabled"}
+                >
+                  Seu navegador nao conseguiu abrir o audio dessa faixa.
+                </audio>
               </div>
             </article>
           `;
@@ -5030,11 +5058,221 @@ function buildMultitrackPlayerMarkup(song) {
       ${hasTracks ? "" : `
         <div class="multitrack-empty-state">
           <strong>Player aguardando as tracks MP3.</strong>
-          <p>Use o botao de carregar MP3s para subir as faixas dessa musica e tocar aqui no app.</p>
+          <p>Use o botao da propria faixa para subir o MP3 e tocar aqui no app.</p>
         </div>
       `}
     </section>
   `;
+}
+
+function destroySimpleTrackPlayers() {
+  for (const cleanup of simpleTrackPlayerCleanup) {
+    try {
+      cleanup();
+    } catch (_error) {
+      // ignora
+    }
+  }
+
+  simpleTrackPlayerCleanup = [];
+}
+
+function getSimpleTrackPlayerRoot() {
+  return elements.lyricsViewer?.querySelector("[data-simple-track-player]") || null;
+}
+
+function getSimpleTrackAudio(slotId) {
+  const playerRoot = getSimpleTrackPlayerRoot();
+
+  if (!playerRoot) {
+    return null;
+  }
+
+  return playerRoot.querySelector(`[data-simple-track-audio="${slotId}"]`);
+}
+
+async function ensureSimpleTrackAudioSource(audioNode) {
+  if (!(audioNode instanceof HTMLAudioElement)) {
+    throw new Error("Player de audio indisponivel.");
+  }
+
+  const existingObjectUrl = cleanText(audioNode.dataset.objectUrl);
+
+  if (existingObjectUrl && cleanText(audioNode.src)) {
+    return existingObjectUrl;
+  }
+
+  if (audioNode.dataset.loadingTrack === "true") {
+    return "";
+  }
+
+  const songId = cleanText(audioNode.dataset.simpleTrackSong);
+  const slotId = cleanText(audioNode.dataset.simpleTrackAudio);
+
+  if (!songId || !slotId) {
+    throw new Error("Nao encontrei a faixa para carregar.");
+  }
+
+  audioNode.dataset.loadingTrack = "true";
+
+  try {
+    const result = await requestCloudApi("getTrackData", {
+      songId,
+      slotId
+    }, {
+      includeAdminKey: false,
+      timeoutMs: 90000
+    });
+
+    const blob = base64ToBlob(result?.base64, result?.mimeType || "audio/mpeg");
+
+    if (!blob.size) {
+      throw new Error("O MP3 dessa faixa veio vazio.");
+    }
+
+    if (existingObjectUrl) {
+      URL.revokeObjectURL(existingObjectUrl);
+    }
+
+    const objectUrl = URL.createObjectURL(blob);
+    audioNode.src = objectUrl;
+    audioNode.dataset.objectUrl = objectUrl;
+    audioNode.load();
+    return objectUrl;
+  } finally {
+    audioNode.dataset.loadingTrack = "false";
+  }
+}
+
+async function handleSelectedSongSingleTrackUpload(songId, slotId, file) {
+  const normalizedSongId = cleanText(songId);
+  const normalizedSlotId = cleanText(slotId);
+  const song = state.catalog.find((item) => item.id === normalizedSongId);
+  const slot = getMultitrackSlotConfig(normalizedSlotId);
+
+  if (!(file instanceof File) || !song || !slot) {
+    setFlash("Nao consegui preparar essa faixa para envio.", "error");
+    return;
+  }
+
+  if (!isCloudModeActive()) {
+    setFlash("Ative a nuvem para enviar e compartilhar as tracks entre os aparelhos.", "error");
+    return;
+  }
+
+  if (!state.adminLoggedIn) {
+    setFlash("Entre como administrador para enviar os MP3s da musica.", "error");
+    return;
+  }
+
+  try {
+    setFlash(`Enviando ${slot.label.toLowerCase()} para ${song.title}...`, "success");
+    const uploadedTrack = await uploadStemTrackToCloud(song.id, song.producer, slot.id, file);
+    const nextAudioTracks = normalizeSongAudioTracks(getSongAudioTracks(song));
+
+    nextAudioTracks[slot.id] = {
+      label: slot.label,
+      url: cleanText(uploadedTrack.url),
+      fileId: cleanText(uploadedTrack.fileId)
+    };
+
+    let savedSong = uploadedTrack.song?.id
+      ? uploadedTrack.song
+      : createSongRecord({
+        ...song,
+        audioTracks: nextAudioTracks
+      });
+
+    if (!uploadedTrack.song?.id) {
+      savedSong = await saveSongToCloud(savedSong);
+    }
+
+    clearSongCatalogKeyDeleted(savedSong);
+    state.catalog = buildSeedBackedCatalog(
+      state.catalog.map((item) => (item.id === normalizedSongId ? savedSong : item))
+    );
+
+    try {
+      const syncedCatalog = await fetchCloudCatalog();
+
+      if (syncedCatalog.length) {
+        state.catalog = syncedCatalog;
+      }
+    } catch (syncError) {
+      console.warn("Nao consegui atualizar o catalogo logo apos enviar a track.", syncError);
+    }
+
+    state.selectedSongId = normalizedSongId;
+    saveCatalog();
+    renderAll();
+    setFlash(`${slot.label} enviada com sucesso.`, "success");
+  } catch (error) {
+    console.error("Falha ao enviar a track individual.", error);
+    setFlash(`Nao consegui enviar ${slot.label.toLowerCase()} agora.`, "error");
+  }
+}
+
+function pauseOtherSimpleTracks(activeAudio) {
+  const playerRoot = getSimpleTrackPlayerRoot();
+
+  if (!playerRoot) {
+    return;
+  }
+
+  playerRoot.querySelectorAll("[data-simple-track-audio]").forEach((audio) => {
+    if (!(audio instanceof HTMLAudioElement) || audio === activeAudio) {
+      return;
+    }
+
+    audio.pause();
+  });
+}
+
+function hydrateSimpleTrackPlayers(song) {
+  destroySimpleTrackPlayers();
+
+  if (!songHasMultitrackPlayer(song)) {
+    return;
+  }
+
+  const playerRoot = getSimpleTrackPlayerRoot();
+
+  if (!playerRoot) {
+    return;
+  }
+
+  playerRoot.querySelectorAll("[data-simple-track-audio]").forEach((audioNode) => {
+    if (!(audioNode instanceof HTMLAudioElement)) {
+      return;
+    }
+
+    const slotId = cleanText(audioNode.dataset.simpleTrackAudio);
+
+    if (!slotId) {
+      return;
+    }
+
+    const handlePlay = () => {
+      pauseOtherSimpleTracks(audioNode);
+    };
+
+    audioNode.addEventListener("play", handlePlay);
+
+    if (!audioNode.disabled) {
+      ensureSimpleTrackAudioSource(audioNode).catch((error) => {
+        console.error(`Falha ao preparar o MP3 da faixa ${slotId}.`, error);
+      });
+    }
+
+    simpleTrackPlayerCleanup.push(() => {
+      audioNode.pause();
+      const objectUrl = cleanText(audioNode.dataset.objectUrl);
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+      audioNode.removeEventListener("play", handlePlay);
+    });
+  });
 }
 
 function getMultitrackReferenceTrack() {
@@ -5489,6 +5727,7 @@ function renderSongViewer() {
   }
 
   if (!song) {
+    destroySimpleTrackPlayers();
     destroyMultitrackPlayer();
     lyricsModal.classList.add("is-hidden");
     lyricsModal.setAttribute("aria-hidden", "true");
@@ -5502,6 +5741,8 @@ function renderSongViewer() {
   const producerName = formatProducerName(song.producer);
   const lyricsMarkup = formatLyricsMarkup(song.lyrics);
   const ministryMode = state.lyricsMinistryMode;
+
+  destroySimpleTrackPlayers();
 
   lyricsViewer.innerHTML = `
     <div class="lyrics-shell ${ministryMode ? "is-ministry" : ""}">
@@ -5582,33 +5823,13 @@ function renderSongViewer() {
   lyricsModal.setAttribute("aria-hidden", "false");
   document.body.style.overflow = "hidden";
 
+  destroyMultitrackPlayer();
+
   if (songHasMultitrackPlayer(song) && !ministryMode) {
-    hydrateMultitrackPlayer(song);
+    hydrateSimpleTrackPlayers(song);
   } else {
-    destroyMultitrackPlayer();
+    destroySimpleTrackPlayers();
   }
-}
-
-function openSelectedSongTrackBatchPicker(songId) {
-  const normalizedSongId = cleanText(songId);
-
-  if (!normalizedSongId) {
-    return;
-  }
-
-  if (!isAdminUser()) {
-    setFlash("Entre como administrador para enviar as tracks da musica.", "error");
-    return;
-  }
-
-  if (!(elements.trackBatchInput instanceof HTMLInputElement)) {
-    setFlash("Nao encontrei o seletor de tracks agora.", "error");
-    return;
-  }
-
-  state.trackBatchTargetSongId = normalizedSongId;
-  elements.trackBatchInput.value = "";
-  elements.trackBatchInput.click();
 }
 
 function renderAdminAuthView() {
@@ -5832,16 +6053,9 @@ function buildAudioTracksUploadFieldMarkup(songLike = {}) {
         <div class="admin-audio-block-head">
           <div>
             <span>Player MP3</span>
-            <p class="helper-text">Envie as 6 faixas alinhadas no mesmo ponto para tocar tudo sincronizado.</p>
+            <p class="helper-text">Envie uma faixa por vez no botao da propria linha.</p>
           </div>
-          <button class="secondary-button" type="button" data-open-track-batch="true" ${uploadAvailable ? "" : "disabled"}>
-            Carregar todas as tracks
-          </button>
         </div>
-
-        <p class="helper-text admin-audio-batch-note">
-          O app tenta encaixar automaticamente pelos nomes: BACK, TECLADOS, DRUMS, GTR, MUSICA e CLICK E GUIA.
-        </p>
 
         <div class="admin-audio-grid">
           ${MULTITRACK_SLOTS.map((slot) => {
@@ -5854,19 +6068,24 @@ function buildAudioTracksUploadFieldMarkup(songLike = {}) {
             return `
               <div class="admin-audio-item ${isReady ? "is-ready" : ""} ${isDraftReady ? "has-draft" : ""}" data-track-upload-slot="${escapeHtml(slot.id)}">
                 <div class="admin-audio-item-head">
-                  <strong>${escapeHtml(slot.label)}</strong>
-                  <span class="status-pill ${isReady ? "is-ready" : ""}" data-track-status="${escapeHtml(slot.id)}">
-                    ${isDraftReady ? "Pronto para enviar" : isReady ? "MP3 pronto" : "Sem MP3"}
-                  </span>
-                </div>
+                  <div class="admin-audio-item-title">
+                    <strong>${escapeHtml(slot.label)}</strong>
+                    <span class="status-pill ${isReady ? "is-ready" : ""}" data-track-status="${escapeHtml(slot.id)}">
+                      ${isDraftReady ? "Pronto para enviar" : isReady ? "MP3 pronto" : "Sem MP3"}
+                    </span>
+                  </div>
 
-                <input
-                  class="admin-input admin-file-input"
-                  type="file"
-                  accept=".mp3,audio/mpeg"
-                  data-track-upload="${escapeHtml(slot.id)}"
-                  ${uploadAvailable ? "" : "disabled"}
-                >
+                  <label class="secondary-button admin-audio-upload-button ${uploadAvailable ? "" : "is-disabled"}">
+                    ${isReady ? "Trocar MP3" : "Carregar MP3"}
+                    <input
+                      class="admin-input admin-file-input admin-audio-hidden-input"
+                      type="file"
+                      accept=".mp3,audio/mpeg"
+                      data-track-upload="${escapeHtml(slot.id)}"
+                      ${uploadAvailable ? "" : "disabled"}
+                    >
+                  </label>
+                </div>
 
                 <p class="helper-text" data-track-hint="${escapeHtml(slot.id)}">
                   ${uploadAvailable
@@ -7067,36 +7286,6 @@ function bindEvents() {
       return;
     }
 
-    const playButton = event.target.closest("[data-player-play]");
-    if (playButton) {
-      playMultitrackPlayer();
-      return;
-    }
-
-    const pauseButton = event.target.closest("[data-player-pause]");
-    if (pauseButton) {
-      pauseMultitrackPlayer();
-      return;
-    }
-
-    const muteButton = event.target.closest("[data-track-mute]");
-    if (muteButton) {
-      toggleMultitrackMute(muteButton.dataset.trackMute);
-      return;
-    }
-
-    const soloButton = event.target.closest("[data-track-solo]");
-    if (soloButton) {
-      toggleMultitrackSolo(soloButton.dataset.trackSolo);
-      return;
-    }
-
-    const openSongAssetsButton = event.target.closest("[data-open-song-assets]");
-    if (openSongAssetsButton) {
-      openSelectedSongTrackBatchPicker(openSongAssetsButton.dataset.openSongAssets);
-      return;
-    }
-
     const clearSongTracksButton = event.target.closest("[data-clear-song-tracks]");
     if (clearSongTracksButton) {
       clearSelectedSongTracks(clearSongTracksButton.dataset.clearSongTracks);
@@ -7130,17 +7319,22 @@ function bindEvents() {
     shareSongToWhatsApp(shareButton.dataset.shareSong);
   });
 
-  elements.lyricsViewer.addEventListener("input", (event) => {
-    const progressInput = event.target.closest("[data-player-progress]");
-    if (progressInput instanceof HTMLInputElement) {
-      seekMultitrackPlayer(progressInput.value);
+  elements.lyricsViewer.addEventListener("change", async (event) => {
+    const uploadInput = event.target.closest("[data-simple-track-upload]");
+
+    if (!(uploadInput instanceof HTMLInputElement)) {
       return;
     }
 
-    const faderInput = event.target.closest("[data-track-fader]");
-    if (faderInput instanceof HTMLInputElement) {
-      setMultitrackTrackDb(faderInput.dataset.trackFader, faderInput.value);
+    const file = uploadInput.files?.[0];
+    const songId = cleanText(uploadInput.dataset.simpleTrackSongUpload);
+    const slotId = cleanText(uploadInput.dataset.simpleTrackUpload);
+
+    if (file instanceof File) {
+      await handleSelectedSongSingleTrackUpload(songId, slotId, file);
     }
+
+    uploadInput.value = "";
   });
 
   elements.lyricsModal.addEventListener("click", (event) => {
@@ -7197,12 +7391,6 @@ function bindEvents() {
     const openCoverBatchButton = event.target.closest("[data-open-cover-batch]");
     if (openCoverBatchButton) {
       elements.coverBatchInput?.click();
-      return;
-    }
-
-    const openTrackBatchButton = event.target.closest("[data-open-track-batch]");
-    if (openTrackBatchButton) {
-      elements.trackBatchInput?.click();
       return;
     }
 
@@ -7292,21 +7480,6 @@ function bindEvents() {
     await handleBatchCoverFiles(event.target.files);
   });
 
-  elements.trackBatchInput?.addEventListener("change", async (event) => {
-    const targetSongId = cleanText(state.trackBatchTargetSongId);
-
-    if (targetSongId) {
-      state.trackBatchTargetSongId = "";
-      await handleSelectedSongTrackUpload(targetSongId, event.target.files);
-    } else {
-      handleBatchTrackFiles(event.target.files);
-    }
-
-    if (event.target instanceof HTMLInputElement) {
-      event.target.value = "";
-    }
-  });
-
   elements.adminModal.addEventListener("input", (event) => {
     if (event.target.id === "admin-song-filter") {
       state.adminFilter = preserveInputText(event.target.value);
@@ -7387,11 +7560,13 @@ function bindEvents() {
   });
 
   window.addEventListener("focus", () => {
-    refreshCloudState({ quiet: true });
+    if (!isLyricsModalOpen()) {
+      refreshCloudState({ quiet: true });
+    }
   });
 
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) {
+    if (!document.hidden && !isLyricsModalOpen()) {
       refreshCloudState({ quiet: true });
     }
   });
@@ -7411,7 +7586,7 @@ async function init() {
 
   if (!cloudRefreshTimerId) {
     cloudRefreshTimerId = window.setInterval(() => {
-      if (!document.hidden) {
+      if (!document.hidden && !isLyricsModalOpen()) {
         refreshCloudState({ quiet: true });
       }
     }, 20000);
