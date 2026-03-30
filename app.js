@@ -5049,8 +5049,7 @@ function buildMultitrackPlayerMarkup(song) {
             <article class="simple-track-player ${isReady ? "" : "is-disabled"}" data-simple-track-slot="${escapeHtml(slot.id)}">
               <div class="simple-track-head">
                 <div class="simple-track-label">${escapeHtml(slot.label)}</div>
-                  <div class="simple-track-head-actions">
-                  <div class="simple-track-status">${isReady ? "Preparando MP3..." : "Sem MP3"}</div>
+                <div class="simple-track-head-actions">
                   ${showAdminUploadShortcut ? `
                     <label class="secondary-button simple-track-upload-button">
                       ${isReady ? "Trocar MP3" : "Carregar MP3"}
@@ -5068,6 +5067,15 @@ function buildMultitrackPlayerMarkup(song) {
               </div>
 
               <div class="simple-track-row">
+                <div class="simple-track-progress-shell" aria-hidden="true">
+                  <div class="simple-track-progress">
+                    <span class="simple-track-progress-fill"></span>
+                  </div>
+                  <span class="simple-track-progress-text">0%</span>
+                </div>
+                <div class="simple-track-status-row">
+                  <div class="simple-track-status">${isReady ? "Preparando MP3..." : "Sem MP3"}</div>
+                </div>
                 <audio
                   class="simple-track-audio"
                   data-simple-track-audio="${escapeHtml(slot.id)}"
@@ -5133,14 +5141,232 @@ function setSimpleTrackStatus(audioNode, text) {
   }
 }
 
-async function ensureSimpleTrackAudioSource(audioNode) {
+function setSimpleTrackLoadingState(audioNode, isLoading) {
+  const playerItem = audioNode instanceof HTMLElement
+    ? audioNode.closest(".simple-track-player")
+    : null;
+
+  if (playerItem) {
+    playerItem.classList.toggle("is-loading", Boolean(isLoading));
+  }
+}
+
+function setSimpleTrackProgress(audioNode, percent = 0) {
+  const playerItem = audioNode instanceof HTMLElement
+    ? audioNode.closest(".simple-track-player")
+    : null;
+
+  if (!playerItem) {
+    return;
+  }
+
+  const safePercent = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+  const progressFill = playerItem.querySelector(".simple-track-progress-fill");
+  const progressText = playerItem.querySelector(".simple-track-progress-text");
+  playerItem.dataset.progress = String(safePercent);
+
+  if (progressFill instanceof HTMLElement) {
+    progressFill.style.width = `${safePercent}%`;
+  }
+
+  if (progressText instanceof HTMLElement) {
+    progressText.textContent = `${safePercent}%`;
+  }
+}
+
+function getSimpleTrackProgress(audioNode) {
+  const playerItem = audioNode instanceof HTMLElement
+    ? audioNode.closest(".simple-track-player")
+    : null;
+
+  return Math.max(0, Math.min(100, Math.round(Number(playerItem?.dataset.progress) || 0)));
+}
+
+function startSimpleTrackFinalProgress(audioNode, onProgress = () => {}) {
+  let currentProgress = getSimpleTrackProgress(audioNode);
+  let timerId = 0;
+
+  const tick = () => {
+    currentProgress = getSimpleTrackProgress(audioNode);
+
+    if (currentProgress >= 99) {
+      return;
+    }
+
+    const nextProgress = currentProgress < 88
+      ? currentProgress + 1.2
+      : currentProgress < 94
+        ? currentProgress + 0.8
+        : currentProgress + 0.45;
+
+    onProgress(Math.min(nextProgress, 99));
+  };
+
+  timerId = window.setInterval(tick, 180);
+  tick();
+
+  return () => {
+    if (timerId) {
+      window.clearInterval(timerId);
+    }
+  };
+}
+
+async function requestTrackDataWithProgress(songId, slotId, onProgress = () => {}) {
+  const services = await ensureCloudClient();
+
+  if (!services?.webAppUrl) {
+    throw new Error("Google Sheets indisponivel.");
+  }
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let fallbackProgress = 0;
+    let fallbackTimerId = 0;
+
+    const stopFallback = () => {
+      if (fallbackTimerId) {
+        window.clearInterval(fallbackTimerId);
+        fallbackTimerId = 0;
+      }
+    };
+
+    const startFallback = () => {
+      if (fallbackTimerId) {
+        return;
+      }
+
+      fallbackTimerId = window.setInterval(() => {
+        if (fallbackProgress >= 84) {
+          return;
+        }
+
+        if (fallbackProgress < 35) {
+          fallbackProgress += 2.6;
+        } else if (fallbackProgress < 70) {
+          fallbackProgress += 1.8;
+        } else if (fallbackProgress < 80) {
+          fallbackProgress += 1.1;
+        } else {
+          fallbackProgress += 0.55;
+        }
+
+        onProgress(Math.min(fallbackProgress, 84));
+      }, 180);
+    };
+
+    xhr.open("POST", services.webAppUrl, true);
+    xhr.timeout = 90000;
+    xhr.setRequestHeader("Content-Type", "text/plain;charset=utf-8");
+
+    xhr.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        const percent = Math.max(1, Math.min(84, Math.round((event.loaded / event.total) * 84)));
+        fallbackProgress = Math.max(fallbackProgress, percent);
+        onProgress(fallbackProgress);
+        return;
+      }
+
+      startFallback();
+    };
+
+    xhr.onloadstart = () => {
+      onProgress(2);
+      startFallback();
+    };
+
+    xhr.onerror = () => {
+      stopFallback();
+      reject(new Error("Nao consegui baixar o MP3 agora."));
+    };
+
+    xhr.ontimeout = () => {
+      stopFallback();
+      reject(new Error("O download do MP3 demorou demais."));
+    };
+
+    xhr.onload = () => {
+      stopFallback();
+
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error("Nao consegui falar com o Google Sheets."));
+        return;
+      }
+
+      let data = {};
+
+      try {
+        data = JSON.parse(xhr.responseText || "{}");
+      } catch (_error) {
+        reject(new Error("O Apps Script respondeu com uma pagina invalida. Revise SHEET_ID, COVERS_FOLDER_ID e publique novamente o Web App."));
+        return;
+      }
+
+      if (data.ok === false) {
+        reject(new Error(cleanText(data?.error) || "Nao consegui abrir o MP3 dessa faixa."));
+        return;
+      }
+
+      onProgress(Math.max(fallbackProgress, 86));
+      resolve(data);
+    };
+
+    xhr.send(JSON.stringify({
+      action: "getTrackData",
+      songId,
+      slotId
+    }));
+  });
+}
+
+function waitForSimpleTrackReady(audioNode, timeoutMs = 12000) {
+  if (!(audioNode instanceof HTMLAudioElement)) {
+    return Promise.resolve();
+  }
+
+  if (audioNode.readyState >= 1) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let done = false;
+    let timeoutId = 0;
+
+    const finish = () => {
+      if (done) {
+        return;
+      }
+
+      done = true;
+      audioNode.removeEventListener("loadedmetadata", finish);
+      audioNode.removeEventListener("canplay", finish);
+
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+      }
+
+      resolve();
+    };
+
+    audioNode.addEventListener("loadedmetadata", finish, { once: true });
+    audioNode.addEventListener("canplay", finish, { once: true });
+    timeoutId = window.setTimeout(finish, timeoutMs);
+  });
+}
+
+async function ensureSimpleTrackAudioSource(audioNode, options = {}) {
   if (!(audioNode instanceof HTMLAudioElement)) {
     throw new Error("Player de audio indisponivel.");
   }
 
+  const onProgress = typeof options.onProgress === "function"
+    ? options.onProgress
+    : () => {};
+
   const existingObjectUrl = cleanText(audioNode.dataset.objectUrl);
 
   if (existingObjectUrl && cleanText(audioNode.src)) {
+    onProgress(100);
     return existingObjectUrl;
   }
 
@@ -5158,13 +5384,8 @@ async function ensureSimpleTrackAudioSource(audioNode) {
   audioNode.dataset.loadingTrack = "true";
 
   try {
-    const result = await requestCloudApi("getTrackData", {
-      songId,
-      slotId
-    }, {
-      includeAdminKey: false,
-      timeoutMs: 90000
-    });
+    const result = await requestTrackDataWithProgress(songId, slotId, onProgress);
+    onProgress(Math.max(88, getSimpleTrackProgress(audioNode)));
 
     const blob = base64ToBlob(result?.base64, result?.mimeType || "audio/mpeg");
 
@@ -5180,34 +5401,54 @@ async function ensureSimpleTrackAudioSource(audioNode) {
     audioNode.src = objectUrl;
     audioNode.dataset.objectUrl = objectUrl;
     audioNode.load();
+    onProgress(Math.max(90, getSimpleTrackProgress(audioNode)));
+    const stopFinalProgress = startSimpleTrackFinalProgress(audioNode, onProgress);
+    await waitForSimpleTrackReady(audioNode);
+    stopFinalProgress();
+    onProgress(100);
     return objectUrl;
   } finally {
     audioNode.dataset.loadingTrack = "false";
   }
 }
 
-async function preloadSimpleTrackAudio(audioNode, retries = 2) {
+async function preloadSimpleTrackAudio(audioNode, retries = 2, resumeFromPercent = 0) {
   if (!(audioNode instanceof HTMLAudioElement) || audioNode.disabled) {
     return;
   }
 
-  setSimpleTrackStatus(audioNode, "Carregando MP3...");
+  const initialPercent = Math.max(0, Math.min(100, Math.round(Number(resumeFromPercent) || 0)));
+  setSimpleTrackLoadingState(audioNode, true);
+  setSimpleTrackProgress(audioNode, initialPercent);
+  setSimpleTrackStatus(audioNode, `Carregando MP3... ${initialPercent}%`);
 
   try {
-    await ensureSimpleTrackAudioSource(audioNode);
+    await ensureSimpleTrackAudioSource(audioNode, {
+      onProgress: (percent) => {
+        const safePercent = Math.max(initialPercent, Math.max(0, Math.min(100, Math.round(Number(percent) || 0))));
+        setSimpleTrackProgress(audioNode, safePercent);
+        setSimpleTrackStatus(audioNode, `Carregando MP3... ${safePercent}%`);
+      }
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 220));
+    setSimpleTrackLoadingState(audioNode, false);
     setSimpleTrackStatus(audioNode, "Pronto para tocar");
   } catch (error) {
     if (retries > 0) {
-      setSimpleTrackStatus(audioNode, "Tentando carregar...");
+      const retryPercent = Math.max(getSimpleTrackProgress(audioNode), 12);
+      setSimpleTrackProgress(audioNode, retryPercent);
+      setSimpleTrackStatus(audioNode, `Tentando carregar... ${retryPercent}%`);
       window.setTimeout(() => {
-        preloadSimpleTrackAudio(audioNode, retries - 1).catch(() => {
+        preloadSimpleTrackAudio(audioNode, retries - 1, retryPercent).catch(() => {
           // ignora erro final no retry agendado
         });
-      }, 1400);
+      }, 900);
       return;
     }
 
     console.error("Falha ao pre-carregar o MP3.", error);
+    setSimpleTrackLoadingState(audioNode, false);
+    setSimpleTrackProgress(audioNode, 0);
     setSimpleTrackStatus(audioNode, "Toque para tentar");
   }
 }
@@ -6976,19 +7217,39 @@ async function openSongLyricsEditor(songId) {
   startEditingSong(song.id);
 }
 
-async function handleCloudAdminLoginSubmit(event) {
-  event.preventDefault();
+function lockSubmitButton(formElement, busyLabel = "Entrando...") {
+  const submitButton = formElement instanceof HTMLFormElement
+    ? formElement.querySelector('button[type="submit"]')
+    : null;
 
-  const formData = new FormData(event.target);
-  const username = cleanText(formData.get("admin-username")) || "admin";
-  const adminPassword = cleanText(formData.get("admin-password"));
-
-  if (!username || !adminPassword) {
-    setFlash("Preencha usuario e senha do administrador.", "error");
-    return;
+  if (!(submitButton instanceof HTMLButtonElement)) {
+    return () => {};
   }
 
+  const originalLabel = submitButton.textContent;
+  submitButton.disabled = true;
+  submitButton.textContent = busyLabel;
+
+  return () => {
+    submitButton.disabled = false;
+    submitButton.textContent = originalLabel;
+  };
+}
+
+async function handleCloudAdminLoginSubmit(event) {
+  event.preventDefault();
+  const releaseSubmitButton = lockSubmitButton(event.target, "Entrando...");
+
   try {
+    const formData = new FormData(event.target);
+    const username = cleanText(formData.get("admin-username")) || "admin";
+    const adminPassword = cleanText(formData.get("admin-password"));
+
+    if (!username || !adminPassword) {
+      setFlash("Preencha usuario e senha do administrador.", "error");
+      return;
+    }
+
     await signInCloudAdmin(username, adminPassword);
     try {
       await fetchCloudMembers();
@@ -7000,23 +7261,26 @@ async function handleCloudAdminLoginSubmit(event) {
   } catch (error) {
     console.error("Falha no login do administrador.", error);
     setFlash("Nao consegui entrar. Confira o usuario admin, a senha e a configuracao do Google Sheets.", "error");
+  } finally {
+    releaseSubmitButton();
   }
 }
 
 async function handleAccessLoginSubmit(event) {
   event.preventDefault();
-
-  const formData = new FormData(event.target);
-  const username = cleanText(formData.get("login-username"));
-  const password = cleanText(formData.get("login-password"));
-  const rememberAccess = Boolean(formData.get("remember-access"));
-
-  if (!username || !password) {
-    setFlash("Preencha usuario e senha para entrar.", "error");
-    return;
-  }
+  const releaseSubmitButton = lockSubmitButton(event.target, "Entrando...");
 
   try {
+    const formData = new FormData(event.target);
+    const username = cleanText(formData.get("login-username"));
+    const password = cleanText(formData.get("login-password"));
+    const rememberAccess = Boolean(formData.get("remember-access"));
+
+    if (!username || !password) {
+      setFlash("Preencha usuario e senha para entrar.", "error");
+      return;
+    }
+
     const localAdminConfig = getAdminConfig();
 
     try {
@@ -7052,9 +7316,11 @@ async function handleAccessLoginSubmit(event) {
           writeRememberedAccess("", "");
         }
 
-        await refreshCloudState({ quiet: true });
         renderAll();
         setFlash("Administrador conectado com sucesso.", "success");
+        refreshCloudState({ quiet: true }).catch((refreshError) => {
+          console.warn("Nao consegui atualizar a nuvem logo apos o login admin.", refreshError);
+        });
         return;
       } catch (adminError) {
       if (isCloudModeActive()) {
@@ -7077,13 +7343,17 @@ async function handleAccessLoginSubmit(event) {
           writeRememberedAccess("", "");
         }
 
-        await refreshCloudState({ quiet: true });
         renderAll();
         setFlash(`Acesso liberado para ${state.currentMemberUsername}.`, "success");
+        refreshCloudState({ quiet: true }).catch((refreshError) => {
+          console.warn("Nao consegui atualizar a nuvem logo apos o login do membro.", refreshError);
+        });
       }
   } catch (error) {
     console.error("Falha no login do app.", error);
     setFlash("Nao consegui entrar. Confira usuario e senha.", "error");
+  } finally {
+    releaseSubmitButton();
   }
 }
 
