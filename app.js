@@ -5817,6 +5817,7 @@ function renderSongViewer() {
   const weeklySelected = isWeeklySelected(song.id);
   const producerName = formatProducerName(song.producer);
   const lyricsMarkup = formatLyricsMarkup(song.lyrics);
+  const lyricsActionLabel = cleanMultilineText(song.lyrics) ? "Editar letra" : "Adicionar letra";
   const ministryMode = state.lyricsMinistryMode;
 
   destroySimpleTrackPlayers();
@@ -5854,6 +5855,13 @@ function renderSongViewer() {
             data-select-weekly-song="${escapeHtml(song.id)}"
           >
             ${weeklySelected ? "Ir para selecionadas da semana" : "Selecionar da semana"}
+          </button>
+          <button
+            class="secondary-button"
+            type="button"
+            data-edit-song-lyrics="${escapeHtml(song.id)}"
+          >
+            ${lyricsActionLabel}
           </button>
         </div>
       </div>
@@ -6956,6 +6964,18 @@ function startEditingSong(songId) {
   setFlash(`Editando: ${song.title}`, "success");
 }
 
+async function openSongLyricsEditor(songId) {
+  const song = state.catalog.find((item) => item.id === cleanText(songId));
+
+  if (!song) {
+    setFlash("Nao encontrei a musica para editar a letra.", "error");
+    return;
+  }
+
+  await openAdminModal("assets");
+  startEditingSong(song.id);
+}
+
 async function handleCloudAdminLoginSubmit(event) {
   event.preventDefault();
 
@@ -7384,6 +7404,12 @@ function bindEvents() {
     const weeklySelectButton = event.target.closest("[data-select-weekly-song]");
     if (weeklySelectButton) {
       addSongToWeeklySelections(weeklySelectButton.dataset.selectWeeklySong);
+      return;
+    }
+
+    const editLyricsButton = event.target.closest("[data-edit-song-lyrics]");
+    if (editLyricsButton) {
+      openSongLyricsEditor(editLyricsButton.dataset.editSongLyrics);
       return;
     }
 
