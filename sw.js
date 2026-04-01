@@ -1,4 +1,4 @@
-const CACHE_NAME = "adoradores-cristo-pwa-v80";
+const CACHE_NAME = "adoradores-cristo-pwa-v81";
 const APP_SHELL = [
   "./",
   "./index.html",

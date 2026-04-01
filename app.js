@@ -70,6 +70,8 @@ const MULTITRACK_DB_MIN = -100;
 const MULTITRACK_DB_MAX = 12;
 const MAX_STEM_UPLOAD_BYTES = 18 * 1024 * 1024;
 const SONGS_PER_PAGE = 54;
+const CLOUD_REFRESH_INTERVAL_MS = 15000;
+const CLOUD_NOTIFICATIONS_REFRESH_INTERVAL_MS = 5000;
 
   function cleanTrackText(value) {
     return String(value ?? "").trim();
@@ -2415,6 +2417,41 @@ async function refreshCloudState(options = {}) {
   return cloudRefreshPromise;
 }
 
+function clearCloudRefreshLoop() {
+  if (!cloudRefreshTimerId) {
+    return;
+  }
+
+  window.clearTimeout(cloudRefreshTimerId);
+  cloudRefreshTimerId = null;
+}
+
+function getCloudRefreshIntervalMs() {
+  if (state.notificationsEnabled) {
+    return CLOUD_NOTIFICATIONS_REFRESH_INTERVAL_MS;
+  }
+
+  return CLOUD_REFRESH_INTERVAL_MS;
+}
+
+function scheduleCloudRefreshLoop() {
+  clearCloudRefreshLoop();
+
+  if (document.hidden || isLyricsModalOpen()) {
+    return;
+  }
+
+  cloudRefreshTimerId = window.setTimeout(async () => {
+    cloudRefreshTimerId = null;
+
+    try {
+      await refreshCloudState({ quiet: true });
+    } finally {
+      scheduleCloudRefreshLoop();
+    }
+  }, getCloudRefreshIntervalMs());
+}
+
 function isLyricsModalOpen() {
   return Boolean(
     elements.lyricsModal
@@ -4391,6 +4428,7 @@ async function handleNotificationsToggle() {
       tag: "notifications-test",
       url: "./"
     });
+    scheduleCloudRefreshLoop();
     setFlash(
       shown
         ? "Teste enviado para este aparelho."
@@ -4408,6 +4446,7 @@ async function handleNotificationsToggle() {
 
   state.notificationsEnabled = nextPermission === "granted";
   renderAll();
+  scheduleCloudRefreshLoop();
 
   if (nextPermission !== "granted") {
     setFlash("Nao consegui ativar as notificacoes neste aparelho.", "error");
@@ -4415,6 +4454,9 @@ async function handleNotificationsToggle() {
   }
 
   updateNotificationFeedFromState();
+  refreshCloudState({ quiet: true }).catch(() => {
+    // segue so com o loop normal
+  });
   const shown = await showAppNotification("Notificacoes ativadas", {
     body: "Vou avisar quando entrar musica nova e quando escolherem a musica da semana.",
     tag: "notifications-enabled",
@@ -5513,6 +5555,7 @@ function closeLyricsModal() {
   destroySimpleTrackPlayers();
   destroyMultitrackPlayer();
   renderAll();
+  scheduleCloudRefreshLoop();
 }
 
 function buildMultitrackScaleMarkup() {
@@ -8474,13 +8517,18 @@ function bindEvents() {
   window.addEventListener("focus", () => {
     if (!isLyricsModalOpen()) {
       refreshCloudState({ quiet: true });
+      scheduleCloudRefreshLoop();
     }
   });
 
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && !isLyricsModalOpen()) {
       refreshCloudState({ quiet: true });
+      scheduleCloudRefreshLoop();
+      return;
     }
+
+    clearCloudRefreshLoop();
   });
 }
 
@@ -8496,14 +8544,7 @@ async function init() {
   await loadCatalog();
   await syncNotificationsWithCatalog(state.catalog, state);
   renderAll();
-
-  if (!cloudRefreshTimerId) {
-    cloudRefreshTimerId = window.setInterval(() => {
-      if (!document.hidden && !isLyricsModalOpen()) {
-        refreshCloudState({ quiet: true });
-      }
-    }, 20000);
-  }
+  scheduleCloudRefreshLoop();
 }
 
 init().catch((error) => {
