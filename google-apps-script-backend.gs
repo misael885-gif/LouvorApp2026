@@ -23,6 +23,7 @@ const AUDIO_TRACK_SLOTS = [
   { id: "full", label: "MUSICA" },
   { id: "keys", label: "TECLADOS" }
 ];
+const ACTIVE_PRESENCE_TTL_MS = 2 * 60 * 1000;
 
 function doGet(e) {
   try {
@@ -148,6 +149,26 @@ function doPost(e) {
       return jsonResponse({
         ok: true,
         sharedState: sharedState
+      });
+    }
+
+    if (action === "syncPresence") {
+      const access = requireSharedStateAccess_(payload);
+      const presence = syncPresence_(payload.sessionId, access);
+      return jsonResponse({
+        ok: true,
+        onlineUsersCount: presence.onlineUsersCount,
+        onlineUsernames: presence.onlineUsernames
+      });
+    }
+
+    if (action === "signOutPresence") {
+      const access = requireSharedStateAccess_(payload);
+      const presence = removePresence_(payload.sessionId);
+      return jsonResponse({
+        ok: true,
+        onlineUsersCount: presence.onlineUsersCount,
+        onlineUsernames: presence.onlineUsernames
       });
     }
 
@@ -886,6 +907,7 @@ function buildPublicSettings_() {
   const rotationSettings = readRotationSettings_();
   const members = readMembers_();
   const sharedState = readSharedState_();
+  const presence = readActivePresence_();
 
   return {
     ok: true,
@@ -897,10 +919,118 @@ function buildPublicSettings_() {
     weeklySelectionOwners: sharedState.weeklySelectionOwners,
     weeklySelectionWeekKey: sharedState.weeklySelectionWeekKey,
     memberLoginRequired: members.length > 0,
+    onlineUsersCount: presence.onlineUsersCount,
+    onlineUsernames: presence.onlineUsernames,
     memberUsernames: members.map(function(member) {
       return member.username;
     })
   };
+}
+
+function readActivePresence_() {
+  const properties = PropertiesService.getScriptProperties();
+  var parsedPresence;
+
+  try {
+    parsedPresence = JSON.parse(cleanValue(properties.getProperty("ACTIVE_PRESENCE_JSON")) || "{}");
+  } catch (error) {
+    parsedPresence = {};
+  }
+
+  const now = Date.now();
+  const nextPresence = {};
+  var hasChanged = false;
+
+  Object.keys(parsedPresence).forEach(function(sessionId) {
+    const entry = parsedPresence[sessionId] && typeof parsedPresence[sessionId] === "object"
+      ? parsedPresence[sessionId]
+      : {};
+    const normalizedSessionId = cleanValue(sessionId);
+    const normalizedUsername = cleanValue(entry.username);
+    const normalizedRole = cleanValue(entry.role);
+    const lastSeenAt = Number(entry.lastSeenAt);
+
+    if (!normalizedSessionId || !normalizedUsername || !normalizedRole || !isFinite(lastSeenAt) || now - lastSeenAt > ACTIVE_PRESENCE_TTL_MS) {
+      hasChanged = true;
+      return;
+    }
+
+    nextPresence[normalizedSessionId] = {
+      username: normalizedUsername,
+      role: normalizedRole,
+      lastSeenAt: lastSeenAt
+    };
+  });
+
+  if (hasChanged) {
+    properties.setProperty("ACTIVE_PRESENCE_JSON", JSON.stringify(nextPresence));
+  }
+
+  return summarizePresence_(nextPresence);
+}
+
+function summarizePresence_(presenceSessions) {
+  const source = presenceSessions && typeof presenceSessions === "object" ? presenceSessions : {};
+  const seenUsernames = {};
+  const usernames = [];
+
+  Object.keys(source).forEach(function(sessionId) {
+    const entry = source[sessionId] && typeof source[sessionId] === "object" ? source[sessionId] : {};
+    const normalizedUsername = cleanValue(entry.username);
+    const usernameKey = normalizeMemberUsername_(normalizedUsername);
+
+    if (!normalizedUsername || !usernameKey || seenUsernames[usernameKey]) {
+      return;
+    }
+
+    seenUsernames[usernameKey] = true;
+    usernames.push(normalizedUsername);
+  });
+
+  usernames.sort(function(leftUsername, rightUsername) {
+    return leftUsername.localeCompare(rightUsername);
+  });
+
+  return {
+    sessions: source,
+    onlineUsersCount: usernames.length,
+    onlineUsernames: usernames
+  };
+}
+
+function syncPresence_(sessionId, access) {
+  const normalizedSessionId = cleanValue(sessionId);
+
+  if (!normalizedSessionId) {
+    throw new Error("Sessao online invalida.");
+  }
+
+  const properties = PropertiesService.getScriptProperties();
+  const presence = readActivePresence_();
+  const nextPresence = presence.sessions;
+
+  nextPresence[normalizedSessionId] = {
+    username: cleanValue(access && access.username),
+    role: cleanValue(access && access.role) || "member",
+    lastSeenAt: Date.now()
+  };
+
+  properties.setProperty("ACTIVE_PRESENCE_JSON", JSON.stringify(nextPresence));
+  return summarizePresence_(nextPresence);
+}
+
+function removePresence_(sessionId) {
+  const normalizedSessionId = cleanValue(sessionId);
+  const properties = PropertiesService.getScriptProperties();
+  const presence = readActivePresence_();
+  const nextPresence = presence.sessions;
+
+  if (normalizedSessionId) {
+    delete nextPresence[normalizedSessionId];
+  }
+
+  properties.setProperty("ACTIVE_PRESENCE_JSON", JSON.stringify(nextPresence));
+  return summarizePresence_(nextPresence);
 }
 
 function readRotationSettings_() {

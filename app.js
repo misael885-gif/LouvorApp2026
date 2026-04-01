@@ -11,7 +11,8 @@ const STORAGE_KEYS = {
   appMeta: "ministerio-multitracks-app-meta-v1",
   memberSession: "ministerio-multitracks-member-session-v1",
   accessSession: "ministerio-multitracks-access-session-v1",
-  rememberedAccess: "ministerio-multitracks-remembered-access-v1"
+  rememberedAccess: "ministerio-multitracks-remembered-access-v1",
+  presenceSession: "ministerio-multitracks-presence-session-v1"
 };
 
 const SEED_CATALOG_ENABLED = true;
@@ -72,6 +73,7 @@ const MAX_STEM_UPLOAD_BYTES = 18 * 1024 * 1024;
 const SONGS_PER_PAGE = 54;
 const CLOUD_REFRESH_INTERVAL_MS = 15000;
 const CLOUD_NOTIFICATIONS_REFRESH_INTERVAL_MS = 5000;
+const PRESENCE_HEARTBEAT_INTERVAL_MS = 45000;
 
   function cleanTrackText(value) {
     return String(value ?? "").trim();
@@ -935,6 +937,7 @@ const elements = {
   searchInput: document.querySelector("#search-input"),
   favoritesFilterButton: document.querySelector("#favorites-filter-button"),
   notificationsToggleButton: document.querySelector("#notifications-toggle-button"),
+  onlineUsersPill: document.querySelector("#online-users-pill"),
   workspaceGrid: document.querySelector(".workspace-grid"),
   songsTitle: document.querySelector("#songs-title"),
   songsCount: document.querySelector("#songs-count"),
@@ -997,6 +1000,8 @@ const state = {
   currentAccessHash: "",
   currentAccessRole: "guest",
   memberLoggedIn: false,
+  onlineUsersCount: 0,
+  onlineUsernames: [],
   rememberedAccess: null,
   isMigratingCatalog: false,
   isRestoringSeedCatalog: false,
@@ -1013,6 +1018,7 @@ let coverAssetDbPromise = null;
 let sharedStateSyncTimerId = null;
 let cloudRefreshTimerId = null;
 let cloudRefreshPromise = null;
+let presenceHeartbeatTimerId = null;
 let serviceWorkerReadyPromise = null;
 let multitrackPlayer = createEmptyMultitrackPlayerState();
 let simpleTrackPlayerCleanup = [];
@@ -2231,21 +2237,23 @@ async function fetchCloudAppMeta() {
         ? result.memberUsernames.map((member) => cleanText(member)).filter(Boolean)
         : cloudMetaCache.memberAccounts
     );
-      const nextMeta = {
-        rotationNames: sanitizeRotationNames(result?.rotationNames),
-        rotationAnchor: normalizeRotationAnchorValue(result?.rotationAnchor),
-        memberLoginRequired: Boolean(result?.memberLoginRequired) || mergedMembers.memberAccounts.length > 0,
-        memberAccounts: mergedMembers.memberAccounts,
-        memberRecords: mergedMembers.memberRecords,
-        favorites: sanitizeSongIdList(result?.favorites),
-        manualRotationOffset: normalizeManualRotationOffset(result?.manualRotationOffset),
-        weeklySelectionWeekKey: cleanText(result?.weeklySelectionWeekKey) || getCurrentWeekKey(),
-        weeklySelectedSongIds: sanitizeSongIdList(result?.weeklySelectedSongIds),
-        weeklySelectionOwners: sanitizeWeeklySelectionOwners(result?.weeklySelectionOwners)
-      };
+    const nextMeta = {
+      rotationNames: sanitizeRotationNames(result?.rotationNames),
+      rotationAnchor: normalizeRotationAnchorValue(result?.rotationAnchor),
+      memberLoginRequired: Boolean(result?.memberLoginRequired) || mergedMembers.memberAccounts.length > 0,
+      memberAccounts: mergedMembers.memberAccounts,
+      memberRecords: mergedMembers.memberRecords,
+      onlineUsersCount: normalizeOnlineUsersCount(result?.onlineUsersCount, result?.onlineUsernames),
+      onlineUsernames: sanitizeOnlineUsernames(result?.onlineUsernames),
+      favorites: sanitizeSongIdList(result?.favorites),
+      manualRotationOffset: normalizeManualRotationOffset(result?.manualRotationOffset),
+      weeklySelectionWeekKey: cleanText(result?.weeklySelectionWeekKey) || getCurrentWeekKey(),
+      weeklySelectedSongIds: sanitizeSongIdList(result?.weeklySelectedSongIds),
+      weeklySelectionOwners: sanitizeWeeklySelectionOwners(result?.weeklySelectionOwners)
+    };
 
-      writeAppMetaCache(nextMeta);
-      return nextMeta;
+    writeAppMetaCache(nextMeta);
+    return nextMeta;
   } catch (error) {
     console.warn("Nao consegui ler as configuracoes extras da nuvem. Mantendo o cache local.", error);
     return readAppMetaCache();
@@ -2683,6 +2691,8 @@ async function signInCloudAdmin(username, adminKey) {
 }
 
 async function signOutCloudAdmin() {
+  clearPresenceHeartbeat();
+  clearPresenceSessionId();
   state.currentAccessRole = "guest";
   state.currentMemberUsername = "";
   state.currentAccessHash = "";
@@ -2693,6 +2703,8 @@ async function signOutCloudAdmin() {
 }
 
 function signOutMember() {
+  clearPresenceHeartbeat();
+  clearPresenceSessionId();
   state.currentMemberUsername = "";
   state.currentAccessHash = "";
   state.currentAccessRole = "guest";
@@ -3972,6 +3984,40 @@ function normalizeRotationAnchorValue(value) {
   return getDefaultRotationAnchorValue();
 }
 
+function sanitizeOnlineUsernames(input) {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  const usernames = [];
+  const seen = new Set();
+
+  for (const entry of input) {
+    const username = cleanText(entry);
+    const usernameKey = normalizeSearch(username);
+
+    if (!username || !usernameKey || seen.has(usernameKey)) {
+      continue;
+    }
+
+    seen.add(usernameKey);
+    usernames.push(username);
+  }
+
+  return usernames.sort((leftUsername, rightUsername) => leftUsername.localeCompare(rightUsername));
+}
+
+function normalizeOnlineUsersCount(value, usernames = []) {
+  const normalizedUsernames = sanitizeOnlineUsernames(usernames);
+  const numericValue = Number(value);
+
+  if (Number.isFinite(numericValue) && numericValue >= 0) {
+    return Math.max(Math.round(numericValue), normalizedUsernames.length);
+  }
+
+  return normalizedUsernames.length;
+}
+
 function sanitizeMemberRecords(input) {
   if (!Array.isArray(input)) {
     return [];
@@ -4005,6 +4051,7 @@ function readAppMetaCache() {
   const memberAccounts = Array.isArray(cachedMeta.memberAccounts)
     ? cachedMeta.memberAccounts.map((member) => cleanText(member)).filter(Boolean)
     : memberRecords.map((member) => member.username);
+  const onlineUsernames = sanitizeOnlineUsernames(cachedMeta.onlineUsernames);
 
   return {
     rotationNames: sanitizeRotationNames(cachedMeta.rotationNames),
@@ -4012,6 +4059,8 @@ function readAppMetaCache() {
     memberLoginRequired: Boolean(cachedMeta.memberLoginRequired),
     memberAccounts,
     memberRecords,
+    onlineUsersCount: normalizeOnlineUsersCount(cachedMeta.onlineUsersCount, onlineUsernames),
+    onlineUsernames,
     favorites: sanitizeSongIdList(cachedMeta.favorites),
     manualRotationOffset: normalizeManualRotationOffset(cachedMeta.manualRotationOffset),
     weeklySelectionWeekKey: cleanText(cachedMeta.weeklySelectionWeekKey) || getCurrentWeekKey(),
@@ -4030,6 +4079,10 @@ function writeAppMetaCache(meta = {}) {
       : Array.isArray(cachedMeta.memberAccounts)
         ? cachedMeta.memberAccounts.map((member) => cleanText(member)).filter(Boolean)
         : sanitizeMemberRecords(cachedMeta.memberRecords).map((member) => member.username);
+  const cachedOnlineUsernames = sanitizeOnlineUsernames(cachedMeta.onlineUsernames);
+  const nextOnlineUsernames = hasOwn(meta, "onlineUsernames")
+    ? sanitizeOnlineUsernames(meta.onlineUsernames)
+    : cachedOnlineUsernames;
 
   return writeJson(STORAGE_KEYS.appMeta, {
     rotationNames: hasOwn(meta, "rotationNames")
@@ -4045,6 +4098,10 @@ function writeAppMetaCache(meta = {}) {
     memberRecords: hasOwn(meta, "memberRecords")
       ? memberRecords
       : sanitizeMemberRecords(cachedMeta.memberRecords),
+    onlineUsersCount: hasOwn(meta, "onlineUsersCount")
+      ? normalizeOnlineUsersCount(meta.onlineUsersCount, nextOnlineUsernames)
+      : normalizeOnlineUsersCount(cachedMeta.onlineUsersCount, cachedOnlineUsernames),
+    onlineUsernames: nextOnlineUsernames,
     favorites: hasOwn(meta, "favorites")
       ? sanitizeSongIdList(meta.favorites)
       : sanitizeSongIdList(cachedMeta.favorites),
@@ -4122,6 +4179,46 @@ function writeAccessSession(role = "", username = "", authHash = "") {
   });
 }
 
+function readPresenceSessionId() {
+  try {
+    return cleanText(localStorage.getItem(STORAGE_KEYS.presenceSession));
+  } catch (error) {
+    console.error("Falha ao ler a sessao online.", error);
+    return "";
+  }
+}
+
+function writePresenceSessionId(sessionId = "") {
+  const normalizedSessionId = cleanText(sessionId);
+
+  try {
+    if (normalizedSessionId) {
+      localStorage.setItem(STORAGE_KEYS.presenceSession, normalizedSessionId);
+      return;
+    }
+
+    localStorage.removeItem(STORAGE_KEYS.presenceSession);
+  } catch (error) {
+    console.error("Falha ao salvar a sessao online.", error);
+  }
+}
+
+function clearPresenceSessionId() {
+  writePresenceSessionId("");
+}
+
+function ensurePresenceSessionId() {
+  const currentSessionId = readPresenceSessionId();
+
+  if (currentSessionId) {
+    return currentSessionId;
+  }
+
+  const nextSessionId = `presence-${buildId()}`;
+  writePresenceSessionId(nextSessionId);
+  return nextSessionId;
+}
+
 function readRememberedAccess() {
   const stored = readJson(STORAGE_KEYS.rememberedAccess, null);
 
@@ -4171,6 +4268,160 @@ function isMemberUser() {
 
 function hasAccessSession() {
   return isAdminUser() || isMemberUser();
+}
+
+function applyPresenceSnapshot(snapshot = {}, options = {}) {
+  const {
+    persist = true
+  } = options;
+  const onlineUsernames = sanitizeOnlineUsernames(snapshot.onlineUsernames);
+  const onlineUsersCount = normalizeOnlineUsersCount(snapshot.onlineUsersCount, onlineUsernames);
+
+  state.onlineUsersCount = onlineUsersCount;
+  state.onlineUsernames = onlineUsernames;
+
+  if (persist) {
+    writeAppMetaCache({
+      onlineUsersCount,
+      onlineUsernames
+    });
+  }
+
+  return {
+    onlineUsersCount,
+    onlineUsernames
+  };
+}
+
+function buildPresenceRequestPayload(sessionId) {
+  const payload = {
+    sessionId: cleanText(sessionId)
+  };
+
+  if (!isAdminUser()) {
+    payload.username = cleanText(state.currentMemberUsername);
+    payload.passwordHash = getCurrentMemberAccessHash();
+  }
+
+  return payload;
+}
+
+function canSyncPresenceToCloud() {
+  if (!isCloudModeActive() || !hasAccessSession()) {
+    return false;
+  }
+
+  if (isAdminUser()) {
+    return Boolean(state.cloudAdminKey);
+  }
+
+  return Boolean(cleanText(state.currentMemberUsername) && getCurrentMemberAccessHash());
+}
+
+async function syncPresenceToCloud(options = {}) {
+  if (!canSyncPresenceToCloud()) {
+    clearPresenceHeartbeat();
+    return null;
+  }
+
+  const {
+    silent = true,
+    render = true
+  } = options;
+
+  try {
+    const result = await requestCloudApi("syncPresence", buildPresenceRequestPayload(ensurePresenceSessionId()), {
+      includeAdminKey: isAdminUser(),
+      timeoutMs: 10000
+    });
+    const snapshot = applyPresenceSnapshot(result);
+
+    if (render) {
+      renderOnlineUsersPill();
+    }
+
+    return snapshot;
+  } catch (error) {
+    console.warn("Nao consegui atualizar os usuarios online.", error);
+
+    if (!silent) {
+      setFlash("Nao consegui atualizar quem esta online agora.", "error");
+    }
+
+    return null;
+  }
+}
+
+function clearPresenceHeartbeat() {
+  if (!presenceHeartbeatTimerId) {
+    return;
+  }
+
+  window.clearTimeout(presenceHeartbeatTimerId);
+  presenceHeartbeatTimerId = null;
+}
+
+function schedulePresenceHeartbeat(options = {}) {
+  clearPresenceHeartbeat();
+
+  if (!canSyncPresenceToCloud()) {
+    return;
+  }
+
+  const {
+    immediate = false
+  } = options;
+
+  presenceHeartbeatTimerId = window.setTimeout(async () => {
+    presenceHeartbeatTimerId = null;
+
+    try {
+      await syncPresenceToCloud({
+        silent: true,
+        render: true
+      });
+    } finally {
+      schedulePresenceHeartbeat();
+    }
+  }, immediate ? 0 : PRESENCE_HEARTBEAT_INTERVAL_MS);
+}
+
+async function signOutPresenceInCloud(options = {}) {
+  const {
+    render = true
+  } = options;
+
+  clearPresenceHeartbeat();
+
+  const sessionId = readPresenceSessionId();
+
+  if (!sessionId) {
+    return null;
+  }
+
+  if (!isCloudModeActive() || !hasAccessSession()) {
+    clearPresenceSessionId();
+    return null;
+  }
+
+  try {
+    const result = await requestCloudApi("signOutPresence", buildPresenceRequestPayload(sessionId), {
+      includeAdminKey: isAdminUser(),
+      timeoutMs: 8000
+    });
+    const snapshot = applyPresenceSnapshot(result);
+
+    if (render) {
+      renderOnlineUsersPill();
+    }
+
+    return snapshot;
+  } catch (error) {
+    console.warn("Nao consegui remover esta sessao da lista online.", error);
+    return null;
+  } finally {
+    clearPresenceSessionId();
+  }
 }
 
 function requiresAppLogin() {
@@ -4322,6 +4573,18 @@ function applyAppMeta(meta = {}) {
     state.memberLoginRequired = Boolean(meta.memberLoginRequired) && (state.memberAccounts.length > 0 || state.memberRecords.length > 0);
   }
 
+  if (hasOwn(meta, "onlineUsersCount") || hasOwn(meta, "onlineUsernames")) {
+    const nextPresence = applyPresenceSnapshot({
+      onlineUsersCount: hasOwn(meta, "onlineUsersCount") ? meta.onlineUsersCount : state.onlineUsersCount,
+      onlineUsernames: hasOwn(meta, "onlineUsernames") ? meta.onlineUsernames : state.onlineUsernames
+    }, {
+      persist: false
+    });
+
+    state.onlineUsersCount = nextPresence.onlineUsersCount;
+    state.onlineUsernames = nextPresence.onlineUsernames;
+  }
+
   if (hasOwn(meta, "favorites")) {
     state.favorites = new Set(sanitizeSongIdList(meta.favorites));
   }
@@ -4347,6 +4610,8 @@ function applyAppMeta(meta = {}) {
     || state.memberRecords.some((member) => normalizeSearch(member.username) === normalizeSearch(currentMemberUsername));
 
   if (!state.memberLoginRequired && state.currentAccessRole !== "admin") {
+    clearPresenceHeartbeat();
+    clearPresenceSessionId();
     state.currentMemberUsername = "";
     state.currentAccessHash = "";
     state.currentAccessRole = state.adminLoggedIn ? "admin" : "guest";
@@ -4364,6 +4629,8 @@ function applyAppMeta(meta = {}) {
   }
 
   if (state.currentAccessRole !== "admin") {
+    clearPresenceHeartbeat();
+    clearPresenceSessionId();
     state.currentMemberUsername = "";
     state.currentAccessHash = "";
     state.currentAccessRole = "guest";
@@ -4407,6 +4674,28 @@ function renderNotificationsToggle() {
   }
 
   elements.notificationsToggleButton.textContent = "Ativar notificacoes";
+}
+
+function renderOnlineUsersPill() {
+  if (!elements.onlineUsersPill) {
+    return;
+  }
+
+  const shouldShow = isGoogleSheetsConfigured() && hasGoogleSheetsSupport();
+  elements.onlineUsersPill.hidden = !shouldShow;
+
+  if (!shouldShow) {
+    return;
+  }
+
+  const onlineUsernames = sanitizeOnlineUsernames(state.onlineUsernames);
+  const onlineUsersCount = normalizeOnlineUsersCount(state.onlineUsersCount, onlineUsernames);
+
+  elements.onlineUsersPill.textContent = `${onlineUsersCount} online`;
+  elements.onlineUsersPill.title = onlineUsernames.length
+    ? `Online agora: ${onlineUsernames.join(", ")}`
+    : "Nenhum usuario online agora.";
+  elements.onlineUsersPill.setAttribute("aria-label", elements.onlineUsersPill.title);
 }
 
 async function handleNotificationsToggle() {
@@ -7358,6 +7647,7 @@ function renderAll() {
   renderTabs();
   renderScreenBanner();
   renderNotificationsToggle();
+  renderOnlineUsersPill();
   renderRecentAdditionsPanel();
   renderWeeklySelectionsPanel();
   renderSongsPanel(getVisibleSongs());
@@ -7822,6 +8112,11 @@ async function handleCloudAdminLoginSubmit(event) {
     } catch (membersError) {
       console.warn("Nao consegui atualizar a lista de membros logo apos o login admin.", membersError);
     }
+    await syncPresenceToCloud({
+      silent: true,
+      render: false
+    });
+    schedulePresenceHeartbeat();
     renderAll();
     setFlash("Login do administrador realizado com sucesso.", "success");
   } catch (error) {
@@ -7882,6 +8177,12 @@ async function handleAccessLoginSubmit(event) {
           writeRememberedAccess("", "");
         }
 
+        await syncPresenceToCloud({
+          silent: true,
+          render: false
+        });
+        schedulePresenceHeartbeat();
+
         renderAll();
         setFlash("Administrador conectado com sucesso.", "success");
         refreshCloudState({ quiet: true }).catch((refreshError) => {
@@ -7908,6 +8209,12 @@ async function handleAccessLoginSubmit(event) {
         } else {
           writeRememberedAccess("", "");
         }
+
+        await syncPresenceToCloud({
+          silent: true,
+          render: false
+        });
+        schedulePresenceHeartbeat();
 
         renderAll();
         setFlash(`Acesso liberado para ${state.currentMemberUsername}.`, "success");
@@ -8012,6 +8319,9 @@ async function handleDeleteMember(username) {
       : (deleteMemberLocally(normalizedUsername), { removedFromCloud: false });
 
     if (normalizeSearch(state.currentMemberUsername) === normalizeSearch(normalizedUsername)) {
+      await signOutPresenceInCloud({
+        render: false
+      });
       signOutMember();
     }
 
@@ -8310,7 +8620,11 @@ function bindEvents() {
     await openAdminModal("assets");
   });
 
-  elements.memberLogoutButton?.addEventListener("click", () => {
+  elements.memberLogoutButton?.addEventListener("click", async () => {
+    await signOutPresenceInCloud({
+      render: false
+    });
+
     if (isAdminUser()) {
       signOutCloudAdmin();
     } else {
@@ -8390,6 +8704,9 @@ function bindEvents() {
     const signOutButton = event.target.closest("[data-cloud-signout]");
     if (signOutButton) {
       try {
+        await signOutPresenceInCloud({
+          render: false
+        });
         await signOutCloudAdmin();
         state.editingSongId = null;
         resetAdminCoverDraft();
@@ -8515,6 +8832,14 @@ function bindEvents() {
   });
 
   window.addEventListener("focus", () => {
+    if (hasAccessSession()) {
+      syncPresenceToCloud({
+        silent: true,
+        render: true
+      });
+      schedulePresenceHeartbeat();
+    }
+
     if (!isLyricsModalOpen()) {
       refreshCloudState({ quiet: true });
       scheduleCloudRefreshLoop();
@@ -8523,6 +8848,14 @@ function bindEvents() {
 
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && !isLyricsModalOpen()) {
+      if (hasAccessSession()) {
+        syncPresenceToCloud({
+          silent: true,
+          render: true
+        });
+        schedulePresenceHeartbeat();
+      }
+
       refreshCloudState({ quiet: true });
       scheduleCloudRefreshLoop();
       return;
@@ -8543,6 +8876,13 @@ async function init() {
   renderAll();
   await loadCatalog();
   await syncNotificationsWithCatalog(state.catalog, state);
+  if (hasAccessSession()) {
+    await syncPresenceToCloud({
+      silent: true,
+      render: false
+    });
+    schedulePresenceHeartbeat();
+  }
   renderAll();
   scheduleCloudRefreshLoop();
 }

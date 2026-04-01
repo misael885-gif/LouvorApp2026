@@ -242,6 +242,30 @@ a {
   color: #d9ffe8;
 }
 
+.online-users-pill {
+  min-width: 0;
+  min-height: 46px;
+  padding: 0 14px 0 12px;
+  gap: 8px;
+  color: #d9ffe8;
+  border-color: rgba(110, 208, 154, 0.22);
+  background: rgba(110, 208, 154, 0.1);
+  font-size: 0.9rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.online-users-pill::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #72dda6;
+  box-shadow: 0 0 0 4px rgba(114, 221, 166, 0.14);
+  flex: 0 0 auto;
+}
+
 .main-layout,
 .workspace-panel,
 .viewer-stack,
