@@ -4,6 +4,7 @@ const STORAGE_KEYS = {
   catalogMigrations: "ministerio-multitracks-catalog-migrations-v5",
   deletedCatalogKeys: "ministerio-multitracks-deleted-catalog-keys-v1",
   preferences: "ministerio-multitracks-preferences-v5",
+  notificationFeed: "ministerio-multitracks-notification-feed-v1",
   adminConfig: "ministerio-multitracks-admin-config-v2",
   adminSession: "ministerio-multitracks-admin-session-v2",
   cloudAdminKey: "ministerio-multitracks-cloud-admin-key-v2",
@@ -931,6 +932,7 @@ const elements = {
   weeklySelectionsPanel: document.querySelector("#weekly-selections-panel"),
   searchInput: document.querySelector("#search-input"),
   favoritesFilterButton: document.querySelector("#favorites-filter-button"),
+  notificationsToggleButton: document.querySelector("#notifications-toggle-button"),
   workspaceGrid: document.querySelector(".workspace-grid"),
   songsTitle: document.querySelector("#songs-title"),
   songsCount: document.querySelector("#songs-count"),
@@ -963,6 +965,7 @@ const state = {
   activeProducer: getInitialProducer(),
   songListPage: 1,
   query: "",
+  notificationsEnabled: true,
   favoritesOnly: false,
   favorites: new Set(),
   manualRotationOffset: 0,
@@ -1143,6 +1146,14 @@ function hasGoogleSheetsSupport() {
   return typeof window.fetch === "function";
 }
 
+function hasNotificationSupport() {
+  return typeof window !== "undefined" && "Notification" in window;
+}
+
+function getNotificationPermission() {
+  return hasNotificationSupport() ? Notification.permission : "denied";
+}
+
 function isCloudModeActive() {
   return state.syncMode === "cloud" && Boolean(cloudEndpoint);
 }
@@ -1299,6 +1310,191 @@ function dataUrlToBlob(dataUrl) {
   }
 
   return new Blob([buffer], { type: mimeType });
+}
+
+function isNotifiableSong(song) {
+  const normalizedId = cleanText(song?.id);
+  return Boolean(normalizedId && !normalizedId.startsWith("seed-"));
+}
+
+function buildNotificationFeedSnapshot(catalog = state.catalog, meta = state) {
+  const songIds = [...(Array.isArray(catalog) ? catalog : [])]
+    .filter((song) => isNotifiableSong(song))
+    .map((song) => cleanText(song.id))
+    .filter(Boolean);
+  const weeklyEntries = sanitizeSongIdList(meta?.weeklySelectedSongIds).map((songId) => {
+    const owner = cleanText(meta?.weeklySelectionOwners?.[songId]);
+    return `${songId}::${owner}`;
+  });
+
+  return {
+    ready: true,
+    songIds: sanitizeSongIdList(songIds),
+    weeklyEntries: [...new Set(weeklyEntries.filter(Boolean))]
+  };
+}
+
+function readNotificationFeed() {
+  const feed = readJson(STORAGE_KEYS.notificationFeed, {});
+  return {
+    ready: Boolean(feed?.ready),
+    songIds: sanitizeSongIdList(feed?.songIds),
+    weeklyEntries: Array.isArray(feed?.weeklyEntries)
+      ? [...new Set(feed.weeklyEntries.map((entry) => cleanText(entry)).filter(Boolean))]
+      : []
+  };
+}
+
+function writeNotificationFeed(feed = {}) {
+  return writeJson(STORAGE_KEYS.notificationFeed, {
+    ready: Boolean(feed?.ready),
+    songIds: sanitizeSongIdList(feed?.songIds),
+    weeklyEntries: Array.isArray(feed?.weeklyEntries)
+      ? [...new Set(feed.weeklyEntries.map((entry) => cleanText(entry)).filter(Boolean))]
+      : []
+  });
+}
+
+function updateNotificationFeedFromState(catalog = state.catalog, meta = state) {
+  writeNotificationFeed(buildNotificationFeedSnapshot(catalog, meta));
+}
+
+function canShowNotifications() {
+  return hasNotificationSupport()
+    && state.notificationsEnabled
+    && getNotificationPermission() === "granted";
+}
+
+function buildNotificationTargetUrl(songLike = {}) {
+  const producer = cleanText(songLike?.producer) === "alagoa" ? "alagoa" : "elite";
+  return `./#${producer}`;
+}
+
+async function showAppNotification(title, options = {}) {
+  if (!canShowNotifications()) {
+    return false;
+  }
+
+  const notificationOptions = {
+    body: cleanText(options.body),
+    tag: cleanText(options.tag),
+    icon: "./icons/icon-192.png",
+    badge: "./icons/icon-192.png",
+    renotify: false,
+    data: {
+      url: cleanText(options.url) || "./"
+    }
+  };
+
+  try {
+    if ("serviceWorker" in navigator) {
+      const registration = await navigator.serviceWorker.getRegistration();
+
+      if (registration?.showNotification) {
+        await registration.showNotification(title, notificationOptions);
+        return true;
+      }
+    }
+
+    const notification = new Notification(title, notificationOptions);
+    notification.onclick = () => {
+      window.focus();
+      if (notificationOptions.data?.url) {
+        window.location.href = notificationOptions.data.url;
+      }
+      notification.close();
+    };
+    return true;
+  } catch (error) {
+    console.warn("Nao consegui mostrar a notificacao do app.", error);
+    return false;
+  }
+}
+
+async function notifyNewSongAdded(song) {
+  if (!song) {
+    return;
+  }
+
+  const title = "Nova musica adicionada";
+  const body = `${cleanText(song.artist) || "Ministerio"} - ${cleanText(song.title) || "Musica"} entrou no ${formatProducerName(song.producer)}.`;
+  await showAppNotification(title, {
+    body,
+    tag: `new-song-${cleanText(song.id)}`,
+    url: buildNotificationTargetUrl(song)
+  });
+}
+
+async function notifyWeeklySelectionAdded(song, owner = "") {
+  if (!song) {
+    return;
+  }
+
+  const normalizedOwner = cleanText(owner);
+  const title = "Musica escolhida da semana";
+  const body = normalizedOwner
+    ? `${normalizedOwner} escolheu ${cleanText(song.artist) || "Ministerio"} - ${cleanText(song.title) || "Musica"}.`
+    : `${cleanText(song.artist) || "Ministerio"} - ${cleanText(song.title) || "Musica"} foi escolhida para a semana.`;
+  await showAppNotification(title, {
+    body,
+    tag: `weekly-song-${cleanText(song.id)}`,
+    url: buildNotificationTargetUrl(song)
+  });
+}
+
+async function syncNotificationsWithCatalog(nextCatalog = state.catalog, nextMeta = state) {
+  const previousFeed = readNotificationFeed();
+  const nextFeed = buildNotificationFeedSnapshot(nextCatalog, nextMeta);
+
+  if (!previousFeed.ready) {
+    writeNotificationFeed(nextFeed);
+    return;
+  }
+
+  const previousSongIds = new Set(previousFeed.songIds);
+  const newSongs = [...(Array.isArray(nextCatalog) ? nextCatalog : [])]
+    .filter((song) => isNotifiableSong(song) && !previousSongIds.has(cleanText(song.id)));
+
+  const previousWeeklyEntries = new Set(previousFeed.weeklyEntries);
+  const nextWeeklyIds = sanitizeSongIdList(nextMeta?.weeklySelectedSongIds);
+  const newWeeklySelections = nextWeeklyIds
+    .map((songId) => {
+      const owner = cleanText(nextMeta?.weeklySelectionOwners?.[songId]);
+      const key = `${songId}::${owner}`;
+      const song = (Array.isArray(nextCatalog) ? nextCatalog : []).find((item) => cleanText(item.id) === songId);
+      return {
+        key,
+        owner,
+        song
+      };
+    })
+    .filter((entry) => entry.song && !previousWeeklyEntries.has(entry.key));
+
+  writeNotificationFeed(nextFeed);
+
+  if (!canShowNotifications()) {
+    return;
+  }
+
+  if (newSongs.length === 1) {
+    await notifyNewSongAdded(newSongs[0]);
+  } else if (newSongs.length > 1) {
+    await showAppNotification("Novas musicas adicionadas", {
+      body: `${newSongs.length} musicas novas entraram no acervo.`,
+      tag: `new-songs-${Date.now()}`,
+      url: "./"
+    });
+  }
+
+  if (newWeeklySelections.length === 1) {
+    await notifyWeeklySelectionAdded(newWeeklySelections[0].song, newWeeklySelections[0].owner);
+  } else if (newWeeklySelections.length > 1) {
+    await showAppNotification("Musicas escolhidas da semana", {
+      body: `${newWeeklySelections.length} musicas foram adicionadas a semana.`,
+      tag: `weekly-songs-${Date.now()}`,
+      url: "./"
+    });
+  }
 }
 
 function base64ToBlob(base64, mimeType = "application/octet-stream") {
@@ -2142,6 +2338,7 @@ async function refreshCloudState(options = {}) {
         fetchCloudCatalog()
       ]);
 
+      await syncNotificationsWithCatalog(cloudCatalog, cloudMeta);
       applyAppMeta(cloudMeta);
       state.catalog = cloudCatalog;
       saveCatalogSnapshot();
@@ -4082,6 +4279,85 @@ function applyAppMeta(meta = {}) {
   }
 }
 
+function renderNotificationsToggle() {
+  if (!elements.notificationsToggleButton) {
+    return;
+  }
+
+  const hasSupport = hasNotificationSupport();
+  const permission = getNotificationPermission();
+  const enabled = state.notificationsEnabled && permission === "granted";
+
+  elements.notificationsToggleButton.hidden = !hasSupport;
+
+  if (!hasSupport) {
+    return;
+  }
+
+  elements.notificationsToggleButton.disabled = false;
+  elements.notificationsToggleButton.setAttribute("aria-pressed", String(enabled));
+
+  if (permission === "granted" && enabled) {
+    elements.notificationsToggleButton.textContent = "Notificacoes ligadas";
+    return;
+  }
+
+  if (permission === "granted" && !state.notificationsEnabled) {
+    elements.notificationsToggleButton.textContent = "Ativar notificacoes";
+    return;
+  }
+
+  if (permission === "denied") {
+    elements.notificationsToggleButton.textContent = "Notificacoes bloqueadas";
+    return;
+  }
+
+  elements.notificationsToggleButton.textContent = "Ativar notificacoes";
+}
+
+async function handleNotificationsToggle() {
+  if (!hasNotificationSupport()) {
+    setFlash("Este aparelho nao suporta notificacoes do navegador.", "error");
+    return;
+  }
+
+  const permission = getNotificationPermission();
+
+  if (permission === "denied") {
+    setFlash("As notificacoes estao bloqueadas neste aparelho. Libere nas configuracoes do navegador.", "error");
+    return;
+  }
+
+  if (permission === "granted" && state.notificationsEnabled) {
+    state.notificationsEnabled = false;
+    renderAll();
+    setFlash("Notificacoes desativadas neste aparelho.", "success");
+    return;
+  }
+
+  let nextPermission = permission;
+
+  if (permission === "default") {
+    nextPermission = await Notification.requestPermission();
+  }
+
+  state.notificationsEnabled = nextPermission === "granted";
+  renderAll();
+
+  if (nextPermission !== "granted") {
+    setFlash("Nao consegui ativar as notificacoes neste aparelho.", "error");
+    return;
+  }
+
+  updateNotificationFeedFromState();
+  await showAppNotification("Notificacoes ativadas", {
+    body: "Vou avisar quando entrar musica nova e quando escolherem a musica da semana.",
+    tag: "notifications-enabled",
+    url: "./"
+  });
+  setFlash("Notificacoes ativadas neste aparelho.", "success");
+}
+
 function createSongRecord(input) {
   const parsedYouTube = parseYouTubeInput(input.youtubeUrl);
   const createdAt = input.createdAt || new Date().toISOString();
@@ -4186,6 +4462,9 @@ function loadPreferences() {
 
   state.query = preserveInputText(stored.query);
   state.favoritesOnly = Boolean(stored.favoritesOnly);
+  state.notificationsEnabled = hasOwn(stored, "notificationsEnabled")
+    ? Boolean(stored.notificationsEnabled)
+    : true;
   state.favorites = new Set(Array.isArray(stored.favorites) ? stored.favorites.map((item) => cleanText(item)).filter(Boolean) : []);
   state.activeProducer = hasHashProducer
     ? getInitialProducer()
@@ -4207,6 +4486,7 @@ function savePreferences() {
   writeJson(STORAGE_KEYS.preferences, {
     query: state.query,
     favoritesOnly: state.favoritesOnly,
+    notificationsEnabled: state.notificationsEnabled,
     favorites: [...state.favorites],
     activeProducer: state.activeProducer,
     manualRotationOffset: Number(state.manualRotationOffset) || 0,
@@ -4674,6 +4954,7 @@ function removeSongFromWeeklySelections(songId) {
   state.weeklySelectedSongIds = state.weeklySelectedSongIds.filter((currentSongId) => currentSongId !== normalizedSongId);
   delete state.weeklySelectionOwners[normalizedSongId];
   writeAppMetaCache(buildSharedAppStatePayload());
+  updateNotificationFeedFromState();
   queueSharedStateSync({
     immediate: true,
     silent: false
@@ -4685,13 +4966,14 @@ function removeSongFromWeeklySelections(songId) {
 function addSongToWeeklySelections(songId) {
   const normalizedSongId = cleanText(songId);
   const song = state.catalog.find((item) => item.id === normalizedSongId);
+  const alreadySelected = isWeeklySelected(normalizedSongId);
 
   if (!song) {
     setFlash("Nao encontrei a musica para selecionar.", "error");
     return;
   }
 
-  if (!isWeeklySelected(normalizedSongId)) {
+  if (!alreadySelected) {
     state.weeklySelectedSongIds = [...state.weeklySelectedSongIds, normalizedSongId];
     state.weeklySelectionOwners[normalizedSongId] = cleanText(state.currentMemberUsername) || "admin";
   }
@@ -4709,6 +4991,13 @@ function addSongToWeeklySelections(songId) {
     elements.weeklySelectionsPanel.scrollIntoView({
       behavior: "smooth",
       block: "start"
+    });
+  }
+
+  if (!alreadySelected) {
+    updateNotificationFeedFromState();
+    notifyWeeklySelectionAdded(song, state.weeklySelectionOwners[normalizedSongId]).catch((error) => {
+      console.warn("Nao consegui mostrar a notificacao da musica da semana.", error);
     });
   }
 
@@ -6955,6 +7244,7 @@ function renderAll() {
   renderHeroStats();
   renderTabs();
   renderScreenBanner();
+  renderNotificationsToggle();
   renderRecentAdditionsPanel();
   renderWeeklySelectionsPanel();
   renderSongsPanel(getVisibleSongs());
@@ -7049,6 +7339,7 @@ function resetSongForm() {
 
 async function saveSongFromForm(formData, formElement = null) {
   const songId = cleanText(formData.get("song-id"));
+  const isNewSong = !songId;
   const currentSong = songId ? state.catalog.find((song) => song.id === songId) : null;
   const requestedProducer = cleanText(formData.get("producer"));
   const producer = currentSong?.producer || (requestedProducer === "alagoa" ? "alagoa" : requestedProducer === "elite" ? "elite" : state.activeProducer);
@@ -7267,7 +7558,14 @@ async function saveSongFromForm(formData, formElement = null) {
     resetAdminCoverDraft();
     resetAdminTrackDrafts();
     saveCatalog();
+    updateNotificationFeedFromState();
     renderAll();
+
+    if (isNewSong) {
+      notifyNewSongAdded(persistedSong).catch((error) => {
+        console.warn("Nao consegui mostrar a notificacao de nova musica.", error);
+      });
+    }
   } catch (error) {
     console.error("Falha ao salvar musica.", error);
     setFlash(isCloudModeActive() ? "Nao consegui salvar na nuvem. Confira sua conexao e a configuracao." : "Nao consegui salvar essa musica.", "error");
@@ -7333,6 +7631,7 @@ async function deleteSong(songId) {
     }
 
     saveCatalog();
+    updateNotificationFeedFromState();
     renderAll();
     setFlash("Musica excluida do catalogo.", "success");
   } catch (error) {
@@ -7742,6 +8041,10 @@ function bindEvents() {
     renderAll();
   });
 
+  elements.notificationsToggleButton?.addEventListener("click", async () => {
+    await handleNotificationsToggle();
+  });
+
   elements.heroStats?.addEventListener("click", (event) => {
     const shiftButton = event.target.closest("[data-shift-weekly-selector]");
 
@@ -8121,6 +8424,7 @@ async function init() {
   bindEvents();
   renderAll();
   await loadCatalog();
+  await syncNotificationsWithCatalog(state.catalog, state);
   renderAll();
 
   if (!cloudRefreshTimerId) {

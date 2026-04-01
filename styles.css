@@ -229,10 +229,17 @@ a {
 }
 
 .favorites-filter-button[aria-pressed="true"],
+.notifications-toggle-button[aria-pressed="true"],
 .favorite-action-button.is-active {
   background: rgba(255, 143, 138, 0.16);
   border-color: rgba(255, 143, 138, 0.4);
   color: #ffd7d4;
+}
+
+.notifications-toggle-button[aria-pressed="true"] {
+  background: rgba(110, 208, 154, 0.16);
+  border-color: rgba(110, 208, 154, 0.36);
+  color: #d9ffe8;
 }
 
 .main-layout,

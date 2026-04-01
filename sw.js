@@ -1,4 +1,4 @@
-const CACHE_NAME = "adoradores-cristo-pwa-v78";
+const CACHE_NAME = "adoradores-cristo-pwa-v79";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -71,6 +71,34 @@ self.addEventListener("fetch", (event) => {
         .catch(() => cachedResponse);
 
       return cachedResponse || networkFetch;
+    })
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+
+  const targetUrl = event.notification?.data?.url || "./";
+
+  event.waitUntil(
+    clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if ("focus" in client) {
+          if ("navigate" in client) {
+            client.navigate(targetUrl).catch(() => {
+              // segue com o focus mesmo se a navegacao falhar
+            });
+          }
+
+          return client.focus();
+        }
+      }
+
+      if (clients.openWindow) {
+        return clients.openWindow(targetUrl);
+      }
+
+      return undefined;
     })
   );
 });
