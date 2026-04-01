@@ -35,6 +35,7 @@ const COVER_ASSET_DB = {
   store: "covers",
   version: 1
 };
+const LOCAL_COVER_MANIFEST_PATH = "./covers/manifest.json";
 
 const PRODUCERS = {
   elite: {
@@ -978,6 +979,7 @@ const state = {
   weeklySelectionOwners: {},
   weeklySelectionWeekKey: "",
   coverAssets: new Map(),
+  localCoverMap: new Map(),
   selectedSongId: null,
   lyricsMinistryMode: false,
   adminLoggedIn: false,
@@ -1238,6 +1240,11 @@ function buildArtworkMonogram(title, artist) {
 }
 
 function resolveSongCoverUrl(songLike) {
+  const localCoverUrl = resolveLocalSongCoverUrl(songLike);
+  if (localCoverUrl) {
+    return localCoverUrl;
+  }
+
   const cloudCoverFileId = cleanText(songLike?.coverFileId);
 
   if (cloudCoverFileId) {
@@ -1350,6 +1357,83 @@ function buildGoogleDriveCoverUrl(fileId, fallbackUrl = "") {
   }
 
   return `https://drive.google.com/thumbnail?id=${encodeURIComponent(normalizedFileId)}&sz=w1600`;
+}
+
+function normalizeLocalCoverPath(pathLike) {
+  const normalizedPath = cleanText(pathLike);
+
+  if (!normalizedPath) {
+    return "";
+  }
+
+  if (/^(https?:)?\/\//i.test(normalizedPath) || normalizedPath.startsWith("./") || normalizedPath.startsWith("../") || normalizedPath.startsWith("/")) {
+    return normalizedPath;
+  }
+
+  return `./covers/${normalizedPath.replace(/^\/+/, "")}`;
+}
+
+function resolveLocalSongCoverUrl(songLike) {
+  if (!(state.localCoverMap instanceof Map) || !state.localCoverMap.size) {
+    return "";
+  }
+
+  const songId = cleanText(songLike?.id);
+  if (songId && state.localCoverMap.has(songId)) {
+    return cleanText(state.localCoverMap.get(songId));
+  }
+
+  const songKey = buildSongCatalogKey(songLike);
+  if (songKey && state.localCoverMap.has(songKey)) {
+    return cleanText(state.localCoverMap.get(songKey));
+  }
+
+  return "";
+}
+
+async function loadLocalCoverManifest() {
+  if (typeof window.fetch !== "function") {
+    state.localCoverMap = new Map();
+    return;
+  }
+
+  try {
+    const response = await fetch(`${LOCAL_COVER_MANIFEST_PATH}?v=20260401-local-covers-1`, {
+      method: "GET",
+      cache: "no-store"
+    });
+
+    if (!response.ok) {
+      state.localCoverMap = new Map();
+      return;
+    }
+
+    const manifest = await response.json();
+    const manifestEntries = manifest && typeof manifest === "object" && !Array.isArray(manifest)
+      ? Object.entries(manifest.covers && typeof manifest.covers === "object" ? manifest.covers : manifest)
+      : [];
+    const nextCoverMap = new Map();
+
+    for (const [rawKey, rawValue] of manifestEntries) {
+      const normalizedKey = cleanText(rawKey);
+      const normalizedValue = normalizeLocalCoverPath(
+        typeof rawValue === "string"
+          ? rawValue
+          : rawValue?.path
+      );
+
+      if (!normalizedKey || !normalizedValue) {
+        continue;
+      }
+
+      nextCoverMap.set(normalizedKey, normalizedValue);
+    }
+
+    state.localCoverMap = nextCoverMap;
+  } catch (error) {
+    console.warn("Nao consegui carregar o manifesto local de capas.", error);
+    state.localCoverMap = new Map();
+  }
 }
 
 function dataUrlToBlob(dataUrl) {
@@ -8870,6 +8954,7 @@ async function init() {
   loadAdminState();
   state.catalog = loadLocalCatalogSnapshot();
   await loadCoverAssetsFromDb();
+  await loadLocalCoverManifest();
   await migrateEmbeddedCoversToIndexedDb();
   loadPreferences();
   bindEvents();
