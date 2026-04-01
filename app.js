@@ -1011,6 +1011,7 @@ let coverAssetDbPromise = null;
 let sharedStateSyncTimerId = null;
 let cloudRefreshTimerId = null;
 let cloudRefreshPromise = null;
+let serviceWorkerReadyPromise = null;
 let multitrackPlayer = createEmptyMultitrackPlayerState();
 let simpleTrackPlayerCleanup = [];
 
@@ -1033,6 +1034,7 @@ function registerServiceWorker() {
   window.addEventListener("load", async () => {
     try {
       const registration = await navigator.serviceWorker.register("./sw.js");
+      serviceWorkerReadyPromise = navigator.serviceWorker.ready.catch(() => registration);
       await registration.update();
     } catch (error) {
       console.error("Nao consegui registrar o service worker.", error);
@@ -1147,11 +1149,55 @@ function hasGoogleSheetsSupport() {
 }
 
 function hasNotificationSupport() {
-  return typeof window !== "undefined" && "Notification" in window;
+  return typeof window !== "undefined" && ("Notification" in window || "serviceWorker" in navigator);
 }
 
 function getNotificationPermission() {
-  return hasNotificationSupport() ? Notification.permission : "denied";
+  return "Notification" in window ? Notification.permission : "denied";
+}
+
+async function getNotificationServiceWorkerRegistration() {
+  if (!("serviceWorker" in navigator)) {
+    return null;
+  }
+
+  try {
+    serviceWorkerReadyPromise ||= navigator.serviceWorker.ready.catch(() => null);
+    const readyRegistration = await serviceWorkerReadyPromise;
+
+    if (readyRegistration) {
+      return readyRegistration;
+    }
+  } catch (_error) {
+    // segue para o fallback abaixo
+  }
+
+  try {
+    return await navigator.serviceWorker.getRegistration();
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function requestNotificationPermissionSafely() {
+  if (!("Notification" in window) || typeof Notification.requestPermission !== "function") {
+    return "denied";
+  }
+
+  if (Notification.permission === "granted" || Notification.permission === "denied") {
+    return Notification.permission;
+  }
+
+  try {
+    const maybePromise = Notification.requestPermission();
+    if (maybePromise && typeof maybePromise.then === "function") {
+      return await maybePromise;
+    }
+
+    return Notification.permission;
+  } catch (_error) {
+    return Notification.permission;
+  }
 }
 
 function isCloudModeActive() {
@@ -1371,7 +1417,11 @@ function buildNotificationTargetUrl(songLike = {}) {
 }
 
 async function showAppNotification(title, options = {}) {
-  if (!canShowNotifications()) {
+  if (!state.notificationsEnabled) {
+    return false;
+  }
+
+  if ("Notification" in window && Notification.permission !== "granted") {
     return false;
   }
 
@@ -1380,6 +1430,8 @@ async function showAppNotification(title, options = {}) {
     tag: cleanText(options.tag),
     icon: "./icons/icon-192.png",
     badge: "./icons/icon-192.png",
+    timestamp: Date.now(),
+    silent: false,
     renotify: false,
     data: {
       url: cleanText(options.url) || "./"
@@ -1387,28 +1439,33 @@ async function showAppNotification(title, options = {}) {
   };
 
   try {
-    if ("serviceWorker" in navigator) {
-      const registration = await navigator.serviceWorker.getRegistration();
+    const registration = await getNotificationServiceWorkerRegistration();
 
-      if (registration?.showNotification) {
-        await registration.showNotification(title, notificationOptions);
-        return true;
-      }
+    if (registration?.showNotification) {
+      await registration.showNotification(title, notificationOptions);
+      return true;
     }
+  } catch (error) {
+    console.warn("Nao consegui mostrar a notificacao via service worker.", error);
+  }
 
-    const notification = new Notification(title, notificationOptions);
-    notification.onclick = () => {
-      window.focus();
-      if (notificationOptions.data?.url) {
-        window.location.href = notificationOptions.data.url;
-      }
-      notification.close();
-    };
-    return true;
+  try {
+    if ("Notification" in window) {
+      const notification = new Notification(title, notificationOptions);
+      notification.onclick = () => {
+        window.focus();
+        if (notificationOptions.data?.url) {
+          window.location.href = notificationOptions.data.url;
+        }
+        notification.close();
+      };
+      return true;
+    }
   } catch (error) {
     console.warn("Nao consegui mostrar a notificacao do app.", error);
-    return false;
   }
+
+  return false;
 }
 
 async function notifyNewSongAdded(song) {
@@ -4298,7 +4355,7 @@ function renderNotificationsToggle() {
   elements.notificationsToggleButton.setAttribute("aria-pressed", String(enabled));
 
   if (permission === "granted" && enabled) {
-    elements.notificationsToggleButton.textContent = "Notificacoes ligadas";
+    elements.notificationsToggleButton.textContent = "Testar notificacoes";
     return;
   }
 
@@ -4329,16 +4386,24 @@ async function handleNotificationsToggle() {
   }
 
   if (permission === "granted" && state.notificationsEnabled) {
-    state.notificationsEnabled = false;
-    renderAll();
-    setFlash("Notificacoes desativadas neste aparelho.", "success");
+    const shown = await showAppNotification("Teste de notificacao", {
+      body: "Se voce recebeu isso, as notificacoes estao funcionando neste aparelho.",
+      tag: "notifications-test",
+      url: "./"
+    });
+    setFlash(
+      shown
+        ? "Teste enviado para este aparelho."
+        : "A permissao existe, mas o aparelho nao exibiu a notificacao.",
+      shown ? "success" : "error"
+    );
     return;
   }
 
   let nextPermission = permission;
 
   if (permission === "default") {
-    nextPermission = await Notification.requestPermission();
+    nextPermission = await requestNotificationPermissionSafely();
   }
 
   state.notificationsEnabled = nextPermission === "granted";
@@ -4350,12 +4415,17 @@ async function handleNotificationsToggle() {
   }
 
   updateNotificationFeedFromState();
-  await showAppNotification("Notificacoes ativadas", {
+  const shown = await showAppNotification("Notificacoes ativadas", {
     body: "Vou avisar quando entrar musica nova e quando escolherem a musica da semana.",
     tag: "notifications-enabled",
     url: "./"
   });
-  setFlash("Notificacoes ativadas neste aparelho.", "success");
+  setFlash(
+    shown
+      ? "Notificacoes ativadas neste aparelho."
+      : "A permissao foi liberada, mas o aparelho nao exibiu a notificacao de teste.",
+    shown ? "success" : "error"
+  );
 }
 
 function createSongRecord(input) {
