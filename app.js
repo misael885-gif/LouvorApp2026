@@ -65,9 +65,10 @@ const MULTITRACK_SLOTS = [
     { id: "keys", label: "TECLADOS", channel: "5" }
   ];
 
-  const MULTITRACK_DB_MIN = -100;
-  const MULTITRACK_DB_MAX = 12;
-  const MAX_STEM_UPLOAD_BYTES = 18 * 1024 * 1024;
+const MULTITRACK_DB_MIN = -100;
+const MULTITRACK_DB_MAX = 12;
+const MAX_STEM_UPLOAD_BYTES = 18 * 1024 * 1024;
+const SONGS_PER_PAGE = 54;
 
   function cleanTrackText(value) {
     return String(value ?? "").trim();
@@ -934,6 +935,7 @@ const elements = {
   songsTitle: document.querySelector("#songs-title"),
   songsCount: document.querySelector("#songs-count"),
   songList: document.querySelector("#song-list"),
+  songPagination: document.querySelector("#song-pagination"),
   viewerPanel: document.querySelector(".viewer-panel"),
   songViewer: document.querySelector("#song-viewer"),
   lyricsModal: document.querySelector("#lyrics-modal"),
@@ -959,6 +961,7 @@ const elements = {
 const state = {
   catalog: [],
   activeProducer: getInitialProducer(),
+  songListPage: 1,
   query: "",
   favoritesOnly: false,
   favorites: new Set(),
@@ -4407,6 +4410,152 @@ function getVisibleSongs() {
   });
 }
 
+function normalizeSongListPage(page, totalPages = 1) {
+  const parsedPage = Number(page);
+  const safeTotalPages = Math.max(1, Number(totalPages) || 1);
+
+  if (!Number.isFinite(parsedPage)) {
+    return 1;
+  }
+
+  return Math.min(Math.max(Math.trunc(parsedPage), 1), safeTotalPages);
+}
+
+function getSongPaginationState(visibleSongs) {
+  const totalSongs = Array.isArray(visibleSongs) ? visibleSongs.length : 0;
+  const totalPages = Math.max(1, Math.ceil(totalSongs / SONGS_PER_PAGE));
+  const currentPage = normalizeSongListPage(state.songListPage, totalPages);
+  const startIndex = totalSongs ? (currentPage - 1) * SONGS_PER_PAGE : 0;
+  const endIndex = totalSongs ? Math.min(startIndex + SONGS_PER_PAGE, totalSongs) : 0;
+
+  state.songListPage = currentPage;
+
+  return {
+    totalSongs,
+    totalPages,
+    currentPage,
+    startIndex,
+    endIndex,
+    pagedSongs: totalSongs ? visibleSongs.slice(startIndex, endIndex) : []
+  };
+}
+
+function buildSongPaginationTokens(totalPages, currentPage) {
+  if (totalPages <= 1) {
+    return [];
+  }
+
+  if (totalPages <= 7) {
+    return Array.from({ length: totalPages }, (_value, index) => index + 1);
+  }
+
+  const tokens = [1];
+  const windowStart = Math.max(2, currentPage - 1);
+  const windowEnd = Math.min(totalPages - 1, currentPage + 1);
+
+  if (windowStart > 2) {
+    tokens.push("ellipsis-start");
+  }
+
+  for (let page = windowStart; page <= windowEnd; page += 1) {
+    tokens.push(page);
+  }
+
+  if (windowEnd < totalPages - 1) {
+    tokens.push("ellipsis-end");
+  }
+
+  tokens.push(totalPages);
+  return tokens;
+}
+
+function renderSongPagination(paginationState) {
+  if (!elements.songPagination) {
+    return;
+  }
+
+  const {
+    totalSongs,
+    totalPages,
+    currentPage,
+    startIndex,
+    endIndex
+  } = paginationState;
+
+  const shouldShowPagination = totalSongs > SONGS_PER_PAGE;
+  elements.songPagination.hidden = !shouldShowPagination;
+
+  if (!shouldShowPagination) {
+    elements.songPagination.innerHTML = "";
+    return;
+  }
+
+  const pageTokens = buildSongPaginationTokens(totalPages, currentPage);
+  const previousDisabled = currentPage <= 1;
+  const nextDisabled = currentPage >= totalPages;
+
+  elements.songPagination.innerHTML = `
+    <div class="song-pagination-summary">
+      <span class="song-pagination-meta">Mostrando ${startIndex + 1}-${endIndex} de ${totalSongs}</span>
+      <span class="song-pagination-meta">Pagina ${currentPage} de ${totalPages}</span>
+    </div>
+    <div class="song-pagination-controls">
+      <button
+        type="button"
+        class="ghost-button song-pagination-button"
+        data-song-page="${currentPage - 1}"
+        ${previousDisabled ? "disabled" : ""}
+      >
+        Anterior
+      </button>
+      <div class="song-pagination-pages" aria-label="Paginas do repertorio">
+        ${pageTokens.map((token) => {
+          if (typeof token !== "number") {
+            return `<span class="song-pagination-ellipsis" aria-hidden="true">...</span>`;
+          }
+
+          const isCurrent = token === currentPage;
+          return `
+            <button
+              type="button"
+              class="ghost-button song-pagination-button ${isCurrent ? "is-current" : ""}"
+              data-song-page="${token}"
+              aria-current="${isCurrent ? "page" : "false"}"
+            >
+              ${token}
+            </button>
+          `;
+        }).join("")}
+      </div>
+      <button
+        type="button"
+        class="ghost-button song-pagination-button"
+        data-song-page="${currentPage + 1}"
+        ${nextDisabled ? "disabled" : ""}
+      >
+        Proxima
+      </button>
+    </div>
+  `;
+}
+
+function resetSongPagination() {
+  state.songListPage = 1;
+}
+
+function goToSongListPage(page) {
+  const visibleSongs = getVisibleSongs();
+  const totalPages = Math.max(1, Math.ceil(visibleSongs.length / SONGS_PER_PAGE));
+  const nextPage = normalizeSongListPage(page, totalPages);
+
+  if (nextPage === state.songListPage) {
+    return;
+  }
+
+  state.songListPage = nextPage;
+  renderAll();
+}
+
 function getSelectedSong() {
   return state.catalog.find((song) => song.id === state.selectedSongId) || null;
 }
@@ -4898,25 +5047,28 @@ function renderScreenBanner() {
 
 function renderSongsPanel(visibleSongs) {
   const producerName = formatProducerName(state.activeProducer);
+  const paginationState = getSongPaginationState(visibleSongs);
+  const songsToRender = paginationState.pagedSongs;
 
   elements.songsTitle.textContent = producerName;
-  elements.songsCount.textContent = `${visibleSongs.length} faixas`;
+  elements.songsCount.textContent = `${paginationState.totalSongs} faixas`;
   elements.favoritesFilterButton.setAttribute("aria-pressed", String(state.favoritesOnly));
   elements.favoritesFilterButton.textContent = state.favoritesOnly ? "Favoritas ligadas" : "Favoritas";
 
-  if (!visibleSongs.length) {
+  if (!paginationState.totalSongs) {
     elements.songList.innerHTML = `
       <div class="empty-state">
         <strong>Nenhuma musica encontrada.</strong>
         <p>Limpe a busca, desligue o filtro de favoritas ou adicione novas musicas pelo cadastro de musica.</p>
       </div>
     `;
+    renderSongPagination(paginationState);
     return;
   }
 
   const producer = PRODUCERS[state.activeProducer];
 
-  elements.songList.innerHTML = visibleSongs
+  elements.songList.innerHTML = songsToRender
     .map((song) => {
       const isActive = state.selectedSongId === song.id;
       const favoriteLabel = isFavorite(song.id) ? '<span class="song-favorite-badge">Favorita</span>' : "";
@@ -4954,6 +5106,7 @@ function renderSongsPanel(visibleSongs) {
       `;
     })
     .join("");
+  renderSongPagination(paginationState);
 }
 
 function formatLyricsMarkup(lyrics) {
@@ -6813,6 +6966,7 @@ function renderAll() {
 
 function selectProducer(producer) {
   state.activeProducer = producer === "alagoa" ? "alagoa" : "elite";
+  resetSongPagination();
   renderAll();
 }
 
@@ -7578,11 +7732,13 @@ function bindEvents() {
 
   elements.searchInput.addEventListener("input", (event) => {
     state.query = preserveInputText(event.target.value);
+    resetSongPagination();
     renderAll();
   });
 
   elements.favoritesFilterButton.addEventListener("click", () => {
     state.favoritesOnly = !state.favoritesOnly;
+    resetSongPagination();
     renderAll();
   });
 
@@ -7604,6 +7760,16 @@ function bindEvents() {
     }
 
     selectSong(button.dataset.songId);
+  });
+
+  elements.songPagination?.addEventListener("click", (event) => {
+    const pageButton = event.target.closest("[data-song-page]");
+
+    if (!pageButton || pageButton.disabled) {
+      return;
+    }
+
+    goToSongListPage(pageButton.dataset.songPage);
   });
 
   elements.recentAdditionsPanel?.addEventListener("click", (event) => {
