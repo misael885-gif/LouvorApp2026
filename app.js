@@ -2038,8 +2038,12 @@ function mergeSeedSongWithExisting(seedSong, existingSong) {
   return createSongRecord({
     ...seedSong,
     id: existingSong.id || seedSong.id,
+    producer: existingSong.producer || seedSong.producer,
+    artist: existingSong.artist || seedSong.artist,
+    title: existingSong.title || seedSong.title,
     lyrics: existingSong.lyrics,
     notes: existingSong.notes,
+    source: existingSong.source || seedSong.source,
     coverUrl: existingSong.coverUrl,
     coverFileId: existingSong.coverFileId,
     coverAssetId: existingSong.coverAssetId,
@@ -2053,6 +2057,7 @@ function mergeSeedSongWithExisting(seedSong, existingSong) {
 function replaceProducerCatalogWithSeed(catalog, producer) {
   const safeProducer = cleanText(producer) === "alagoa" ? "alagoa" : "elite";
   const normalizedCatalog = dedupeCatalogSongs(catalog);
+  const existingSongsById = new Map();
   const existingSongsByKey = new Map();
 
   for (const song of normalizedCatalog) {
@@ -2060,7 +2065,12 @@ function replaceProducerCatalogWithSeed(catalog, producer) {
       continue;
     }
 
+    const songId = cleanText(song.id);
     const key = buildSongCatalogKey(song);
+
+    if (songId && !existingSongsById.has(songId)) {
+      existingSongsById.set(songId, song);
+    }
 
     if (key && !existingSongsByKey.has(key)) {
       existingSongsByKey.set(key, song);
@@ -2069,7 +2079,10 @@ function replaceProducerCatalogWithSeed(catalog, producer) {
 
   const replacementSongs = buildSeedCatalog()
     .filter((song) => song.producer === safeProducer)
-    .map((seedSong) => mergeSeedSongWithExisting(seedSong, existingSongsByKey.get(buildSongCatalogKey(seedSong))))
+    .map((seedSong) => mergeSeedSongWithExisting(
+      seedSong,
+      existingSongsById.get(cleanText(seedSong.id)) || existingSongsByKey.get(buildSongCatalogKey(seedSong))
+    ))
     .sort((leftSong, rightSong) => compareText(leftSong.artist, rightSong.artist) || compareText(leftSong.title, rightSong.title));
 
   return sortCatalogSongs([
@@ -2086,15 +2099,28 @@ function buildSeedBackedCatalog(catalog) {
     return normalizedCatalog;
   }
 
+  const existingSongsById = new Map(
+    normalizedCatalog
+      .map((song) => [cleanText(song.id), song])
+      .filter(([id]) => Boolean(id))
+  );
   const existingSongsByKey = new Map(
     normalizedCatalog
       .map((song) => [buildSongCatalogKey(song), song])
       .filter(([key]) => Boolean(key))
   );
+  const seedIds = new Set(seedCatalog.map((song) => cleanText(song.id)).filter(Boolean));
   const seedKeys = new Set(seedCatalog.map((song) => buildSongCatalogKey(song)).filter(Boolean));
-  const mergedSeedSongs = seedCatalog.map((seedSong) => mergeSeedSongWithExisting(seedSong, existingSongsByKey.get(buildSongCatalogKey(seedSong))));
+  const mergedSeedSongs = seedCatalog.map((seedSong) => mergeSeedSongWithExisting(
+    seedSong,
+    existingSongsById.get(cleanText(seedSong.id)) || existingSongsByKey.get(buildSongCatalogKey(seedSong))
+  ));
   const extraSongs = normalizedCatalog.filter((song) => {
+    const songId = cleanText(song.id);
     const key = buildSongCatalogKey(song);
+    if (songId && seedIds.has(songId)) {
+      return false;
+    }
     return key ? !seedKeys.has(key) : true;
   });
 
@@ -5188,26 +5214,38 @@ function getSongsByProducer(producer) {
   return state.catalog.filter((song) => song.producer === producer);
 }
 
-function buildSeedSongKeyMap() {
+function buildSeedSongIdentityMap() {
   const seedSongs = buildSeedCatalog();
-  const songKeysByProducer = new Map();
+  const songIdentityByProducer = new Map();
 
   for (const song of seedSongs) {
     const producer = cleanText(song.producer);
+    const songId = cleanText(song.id);
     const songKey = buildSongCatalogKey(song);
 
-    if (!producer || !songKey) {
+    if (!producer || (!songId && !songKey)) {
       continue;
     }
 
-    if (!songKeysByProducer.has(producer)) {
-      songKeysByProducer.set(producer, new Set());
+    if (!songIdentityByProducer.has(producer)) {
+      songIdentityByProducer.set(producer, {
+        ids: new Set(),
+        keys: new Set()
+      });
     }
 
-    songKeysByProducer.get(producer).add(songKey);
+    const bucket = songIdentityByProducer.get(producer);
+
+    if (songId) {
+      bucket.ids.add(songId);
+    }
+
+    if (songKey) {
+      bucket.keys.add(songKey);
+    }
   }
 
-  return songKeysByProducer;
+  return songIdentityByProducer;
 }
 
 function getPublicSongsByProducer(producer) {
@@ -5218,10 +5256,17 @@ function getPublicSongsByProducer(producer) {
     return songs;
   }
 
-  const seedSongKeyMap = buildSeedSongKeyMap();
-  const validKeys = seedSongKeyMap.get(normalizedProducer) || new Set();
+  const seedSongIdentityMap = buildSeedSongIdentityMap();
+  const validIdentity = seedSongIdentityMap.get(normalizedProducer) || {
+    ids: new Set(),
+    keys: new Set()
+  };
 
-  return songs.filter((song) => validKeys.has(buildSongCatalogKey(song)));
+  return songs.filter((song) => {
+    const songId = cleanText(song.id);
+    const songKey = buildSongCatalogKey(song);
+    return validIdentity.ids.has(songId) || validIdentity.keys.has(songKey);
+  });
 }
 
 function getProducerSummary(producer) {
