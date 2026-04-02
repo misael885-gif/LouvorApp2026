@@ -3,6 +3,7 @@ const STORAGE_KEYS = {
   catalogBackup: "ministerio-multitracks-catalog-backup-v6",
   catalogMigrations: "ministerio-multitracks-catalog-migrations-v5",
   deletedCatalogKeys: "ministerio-multitracks-deleted-catalog-keys-v1",
+  disabledLocalCovers: "ministerio-multitracks-disabled-local-covers-v1",
   preferences: "ministerio-multitracks-preferences-v5",
   notificationFeed: "ministerio-multitracks-notification-feed-v1",
   adminConfig: "ministerio-multitracks-admin-config-v2",
@@ -980,6 +981,7 @@ const state = {
   weeklySelectionWeekKey: "",
   coverAssets: new Map(),
   localCoverMap: new Map(),
+  disabledLocalCoverKeys: new Set(),
   selectedSongId: null,
   lyricsMinistryMode: false,
   adminLoggedIn: false,
@@ -1373,8 +1375,66 @@ function normalizeLocalCoverPath(pathLike) {
   return `./covers/${normalizedPath.replace(/^\/+/, "")}`;
 }
 
+function readDisabledLocalCoverKeys() {
+  const stored = readJson(STORAGE_KEYS.disabledLocalCovers, []);
+  return Array.isArray(stored)
+    ? stored.map((entry) => cleanText(entry)).filter(Boolean)
+    : [];
+}
+
+function writeDisabledLocalCoverKeys(keys = []) {
+  const normalizedKeys = [...new Set(keys.map((entry) => cleanText(entry)).filter(Boolean))];
+  writeJson(STORAGE_KEYS.disabledLocalCovers, normalizedKeys);
+  state.disabledLocalCoverKeys = new Set(normalizedKeys);
+}
+
+function getSongLocalCoverKeys(songLike) {
+  const keys = [
+    cleanText(songLike?.id),
+    buildSongCatalogKey(songLike)
+  ].filter(Boolean);
+
+  return [...new Set(keys)];
+}
+
+function hasMappedLocalCover(songLike) {
+  if (!(state.localCoverMap instanceof Map) || !state.localCoverMap.size) {
+    return false;
+  }
+
+  return getSongLocalCoverKeys(songLike).some((key) => state.localCoverMap.has(key));
+}
+
+function isLocalCoverDisabled(songLike) {
+  const disabledKeys = state.disabledLocalCoverKeys instanceof Set
+    ? state.disabledLocalCoverKeys
+    : new Set(readDisabledLocalCoverKeys());
+
+  return getSongLocalCoverKeys(songLike).some((key) => disabledKeys.has(key));
+}
+
+function setLocalCoverDisabled(songLike, disabled = true) {
+  const disabledKeys = state.disabledLocalCoverKeys instanceof Set
+    ? new Set(state.disabledLocalCoverKeys)
+    : new Set(readDisabledLocalCoverKeys());
+
+  for (const key of getSongLocalCoverKeys(songLike)) {
+    if (disabled) {
+      disabledKeys.add(key);
+    } else {
+      disabledKeys.delete(key);
+    }
+  }
+
+  writeDisabledLocalCoverKeys([...disabledKeys]);
+}
+
 function resolveLocalSongCoverUrl(songLike) {
   if (!(state.localCoverMap instanceof Map) || !state.localCoverMap.size) {
+    return "";
+  }
+
+  if (isLocalCoverDisabled(songLike)) {
     return "";
   }
 
@@ -1978,8 +2038,12 @@ function mergeSeedSongWithExisting(seedSong, existingSong) {
   return createSongRecord({
     ...seedSong,
     id: existingSong.id || seedSong.id,
+    producer: existingSong.producer || seedSong.producer,
+    artist: existingSong.artist || seedSong.artist,
+    title: existingSong.title || seedSong.title,
     lyrics: existingSong.lyrics,
     notes: existingSong.notes,
+    source: existingSong.source || seedSong.source,
     coverUrl: existingSong.coverUrl,
     coverFileId: existingSong.coverFileId,
     coverAssetId: existingSong.coverAssetId,
@@ -1993,6 +2057,7 @@ function mergeSeedSongWithExisting(seedSong, existingSong) {
 function replaceProducerCatalogWithSeed(catalog, producer) {
   const safeProducer = cleanText(producer) === "alagoa" ? "alagoa" : "elite";
   const normalizedCatalog = dedupeCatalogSongs(catalog);
+  const existingSongsById = new Map();
   const existingSongsByKey = new Map();
 
   for (const song of normalizedCatalog) {
@@ -2000,7 +2065,12 @@ function replaceProducerCatalogWithSeed(catalog, producer) {
       continue;
     }
 
+    const songId = cleanText(song.id);
     const key = buildSongCatalogKey(song);
+
+    if (songId && !existingSongsById.has(songId)) {
+      existingSongsById.set(songId, song);
+    }
 
     if (key && !existingSongsByKey.has(key)) {
       existingSongsByKey.set(key, song);
@@ -2009,7 +2079,10 @@ function replaceProducerCatalogWithSeed(catalog, producer) {
 
   const replacementSongs = buildSeedCatalog()
     .filter((song) => song.producer === safeProducer)
-    .map((seedSong) => mergeSeedSongWithExisting(seedSong, existingSongsByKey.get(buildSongCatalogKey(seedSong))))
+    .map((seedSong) => mergeSeedSongWithExisting(
+      seedSong,
+      existingSongsById.get(cleanText(seedSong.id)) || existingSongsByKey.get(buildSongCatalogKey(seedSong))
+    ))
     .sort((leftSong, rightSong) => compareText(leftSong.artist, rightSong.artist) || compareText(leftSong.title, rightSong.title));
 
   return sortCatalogSongs([
@@ -2026,15 +2099,28 @@ function buildSeedBackedCatalog(catalog) {
     return normalizedCatalog;
   }
 
+  const existingSongsById = new Map(
+    normalizedCatalog
+      .map((song) => [cleanText(song.id), song])
+      .filter(([id]) => Boolean(id))
+  );
   const existingSongsByKey = new Map(
     normalizedCatalog
       .map((song) => [buildSongCatalogKey(song), song])
       .filter(([key]) => Boolean(key))
   );
+  const seedIds = new Set(seedCatalog.map((song) => cleanText(song.id)).filter(Boolean));
   const seedKeys = new Set(seedCatalog.map((song) => buildSongCatalogKey(song)).filter(Boolean));
-  const mergedSeedSongs = seedCatalog.map((seedSong) => mergeSeedSongWithExisting(seedSong, existingSongsByKey.get(buildSongCatalogKey(seedSong))));
+  const mergedSeedSongs = seedCatalog.map((seedSong) => mergeSeedSongWithExisting(
+    seedSong,
+    existingSongsById.get(cleanText(seedSong.id)) || existingSongsByKey.get(buildSongCatalogKey(seedSong))
+  ));
   const extraSongs = normalizedCatalog.filter((song) => {
+    const songId = cleanText(song.id);
     const key = buildSongCatalogKey(song);
+    if (songId && seedIds.has(songId)) {
+      return false;
+    }
     return key ? !seedKeys.has(key) : true;
   });
 
@@ -4774,12 +4860,31 @@ function renderOnlineUsersPill() {
 
   const onlineUsernames = sanitizeOnlineUsernames(state.onlineUsernames);
   const onlineUsersCount = normalizeOnlineUsersCount(state.onlineUsersCount, onlineUsernames);
-
-  elements.onlineUsersPill.textContent = `${onlineUsersCount} online`;
-  elements.onlineUsersPill.title = onlineUsernames.length
+  const visibleNames = onlineUsernames.slice(0, 2).join(", ");
+  const hiddenNamesCount = Math.max(0, onlineUsernames.length - 2);
+  const namesLabel = visibleNames
+    ? `${visibleNames}${hiddenNamesCount ? ` +${hiddenNamesCount}` : ""}`
+    : onlineUsersCount
+      ? "Acessos ativos"
+      : "Ninguem online";
+  const title = onlineUsernames.length
     ? `Online agora: ${onlineUsernames.join(", ")}`
     : "Nenhum usuario online agora.";
-  elements.onlineUsersPill.setAttribute("aria-label", elements.onlineUsersPill.title);
+
+  elements.onlineUsersPill.replaceChildren();
+
+  const countLabel = document.createElement("span");
+  countLabel.className = "online-users-pill-count";
+  countLabel.textContent = `${onlineUsersCount} online`;
+
+  const usersLabel = document.createElement("span");
+  usersLabel.className = "online-users-pill-names";
+  usersLabel.textContent = namesLabel;
+  usersLabel.hidden = !namesLabel;
+
+  elements.onlineUsersPill.append(countLabel, usersLabel);
+  elements.onlineUsersPill.title = title;
+  elements.onlineUsersPill.setAttribute("aria-label", title);
 }
 
 async function handleNotificationsToggle() {
@@ -4956,6 +5061,7 @@ function loadPreferences() {
       : stored.activeProducer === "alagoa"
       ? "alagoa"
       : "elite";
+  state.disabledLocalCoverKeys = new Set(readDisabledLocalCoverKeys());
   state.manualRotationOffset = Number.isFinite(Number(stored.manualRotationOffset))
     ? Number(stored.manualRotationOffset)
     : 0;
@@ -5108,26 +5214,38 @@ function getSongsByProducer(producer) {
   return state.catalog.filter((song) => song.producer === producer);
 }
 
-function buildSeedSongKeyMap() {
+function buildSeedSongIdentityMap() {
   const seedSongs = buildSeedCatalog();
-  const songKeysByProducer = new Map();
+  const songIdentityByProducer = new Map();
 
   for (const song of seedSongs) {
     const producer = cleanText(song.producer);
+    const songId = cleanText(song.id);
     const songKey = buildSongCatalogKey(song);
 
-    if (!producer || !songKey) {
+    if (!producer || (!songId && !songKey)) {
       continue;
     }
 
-    if (!songKeysByProducer.has(producer)) {
-      songKeysByProducer.set(producer, new Set());
+    if (!songIdentityByProducer.has(producer)) {
+      songIdentityByProducer.set(producer, {
+        ids: new Set(),
+        keys: new Set()
+      });
     }
 
-    songKeysByProducer.get(producer).add(songKey);
+    const bucket = songIdentityByProducer.get(producer);
+
+    if (songId) {
+      bucket.ids.add(songId);
+    }
+
+    if (songKey) {
+      bucket.keys.add(songKey);
+    }
   }
 
-  return songKeysByProducer;
+  return songIdentityByProducer;
 }
 
 function getPublicSongsByProducer(producer) {
@@ -5138,10 +5256,17 @@ function getPublicSongsByProducer(producer) {
     return songs;
   }
 
-  const seedSongKeyMap = buildSeedSongKeyMap();
-  const validKeys = seedSongKeyMap.get(normalizedProducer) || new Set();
+  const seedSongIdentityMap = buildSeedSongIdentityMap();
+  const validIdentity = seedSongIdentityMap.get(normalizedProducer) || {
+    ids: new Set(),
+    keys: new Set()
+  };
 
-  return songs.filter((song) => validKeys.has(buildSongCatalogKey(song)));
+  return songs.filter((song) => {
+    const songId = cleanText(song.id);
+    const songKey = buildSongCatalogKey(song);
+    return validIdentity.ids.has(songId) || validIdentity.keys.has(songKey);
+  });
 }
 
 function getProducerSummary(producer) {
@@ -6988,6 +7113,9 @@ function renderSongViewer() {
   const lyricsMarkup = formatLyricsMarkup(song.lyrics);
   const lyricsActionLabel = cleanMultilineText(song.lyrics) ? "Editar letra" : "Adicionar letra";
   const ministryMode = state.lyricsMinistryMode;
+  const hasMappedCover = hasMappedLocalCover(song);
+  const localCoverDisabled = isLocalCoverDisabled(song);
+  const localCoverToggleLabel = localCoverDisabled ? "Restaurar capa local" : "Desativar capa local";
 
   destroySimpleTrackPlayers();
 
@@ -7032,6 +7160,16 @@ function renderSongViewer() {
           >
             ${lyricsActionLabel}
           </button>
+          ${hasMappedCover ? `
+            <button
+              class="secondary-button ${localCoverDisabled ? "is-active" : ""}"
+              type="button"
+              data-toggle-local-cover="${escapeHtml(song.id)}"
+              aria-pressed="${localCoverDisabled ? "true" : "false"}"
+            >
+              ${localCoverToggleLabel}
+            </button>
+          ` : ""}
         </div>
       </div>
 
@@ -7574,7 +7712,7 @@ function buildAssetEditorMarkup(editingSong) {
       <div class="admin-card-head">
         <div>
           <p class="eyebrow">Edicao</p>
-          <h4>Editar capa, letra e link</h4>
+          <h4>Editar musica</h4>
         </div>
         <div class="admin-head-actions">
           <span class="badge">${escapeHtml(producerName)}</span>
@@ -7582,24 +7720,24 @@ function buildAssetEditorMarkup(editingSong) {
         </div>
       </div>
 
-      <p class="helper-text admin-intro-copy">Atualize a faixa do acervo com capa, letra e link do YouTube sem mexer no restante do cadastro.</p>
+      <p class="helper-text admin-intro-copy">Atualize artista, titulo, capa, letra e os arquivos da musica sem precisar recadastrar tudo.</p>
 
       <form id="admin-song-form" class="admin-form-grid">
         <input type="hidden" name="song-id" value="${escapeHtml(editingSong.id)}">
 
         <div class="field-block">
           <label for="song-artist">Nome do artista</label>
-          <input id="song-artist" class="admin-input is-readonly" name="artist" type="text" value="${escapeHtml(editingSong.artist || "")}" readonly>
+          <input id="song-artist" class="admin-input" name="artist" type="text" data-form-focus="true" value="${escapeHtml(editingSong.artist || "")}">
         </div>
 
         <div class="field-block">
           <label for="song-title">Titulo da musica</label>
-          <input id="song-title" class="admin-input is-readonly" name="title" type="text" value="${escapeHtml(editingSong.title || "")}" readonly>
+          <input id="song-title" class="admin-input" name="title" type="text" value="${escapeHtml(editingSong.title || "")}">
         </div>
 
         <div class="field-block full">
           <label for="song-youtube-url">Link do YouTube</label>
-          <input id="song-youtube-url" class="admin-input" name="youtube-url" type="url" data-form-focus="true" value="${escapeHtml(editingSong.youtubeUrl || "")}" placeholder="https://www.youtube.com/watch?v=...">
+          <input id="song-youtube-url" class="admin-input" name="youtube-url" type="url" value="${escapeHtml(editingSong.youtubeUrl || "")}" placeholder="https://www.youtube.com/watch?v=...">
         </div>
 
         <div class="field-block full">
@@ -8782,6 +8920,27 @@ function bindEvents() {
       setAdminCoverDraft("");
       updateAdminCoverPreview();
       setFlash("Capa removida do cadastro.", "success");
+      return;
+    }
+
+    const toggleLocalCoverButton = event.target.closest("[data-toggle-local-cover]");
+    if (toggleLocalCoverButton) {
+      const song = state.catalog.find((item) => item.id === cleanText(toggleLocalCoverButton.dataset.toggleLocalCover));
+
+      if (!song || !hasMappedLocalCover(song)) {
+        setFlash("Nao encontrei uma capa local para essa musica.", "error");
+        return;
+      }
+
+      const shouldDisable = !isLocalCoverDisabled(song);
+      setLocalCoverDisabled(song, shouldDisable);
+      renderAll();
+      setFlash(
+        shouldDisable
+          ? "Capa local desativada com seguranca. O arquivo foi preservado."
+          : "Capa local restaurada com sucesso.",
+        "success"
+      );
       return;
     }
 
