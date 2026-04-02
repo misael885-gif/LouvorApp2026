@@ -242,6 +242,12 @@ a {
   color: #d9ffe8;
 }
 
+.secondary-button.is-active {
+  background: rgba(242, 191, 99, 0.14);
+  border-color: rgba(242, 191, 99, 0.34);
+  color: #ffe0a2;
+}
+
 .online-users-pill {
   min-width: 0;
   min-height: 46px;
@@ -253,6 +259,9 @@ a {
   font-size: 0.9rem;
   font-weight: 600;
   letter-spacing: 0.01em;
+  justify-content: flex-start;
+  max-width: min(100%, 320px);
+  overflow: hidden;
   white-space: nowrap;
 }
 
@@ -264,6 +273,19 @@ a {
   background: #72dda6;
   box-shadow: 0 0 0 4px rgba(114, 221, 166, 0.14);
   flex: 0 0 auto;
+}
+
+.online-users-pill-count {
+  flex: 0 0 auto;
+}
+
+.online-users-pill-names {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(217, 255, 232, 0.82);
+  font-size: 0.78rem;
+  font-weight: 500;
+  text-overflow: ellipsis;
 }
 
 .main-layout,
