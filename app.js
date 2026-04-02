@@ -21,7 +21,8 @@ const ENABLED_SEED_PRODUCERS = new Set(["elite", "alagoa"]);
 
 const CATALOG_MIGRATIONS = {
   replaceAlagoaMarch2026: "2026-03-27-replace-alagoa-catalog-v1",
-  replaceEliteMarch2026: "2026-03-27-replace-elite-catalog-v1"
+  replaceEliteMarch2026: "2026-03-27-replace-elite-catalog-v1",
+  renameEliteSongsApril2026: "2026-04-02-rename-elite-seed-songs-v1"
 };
 
 const WEEKLY_SELECTOR_ROTATION = ["Daniela", "Mileide", "Tamires"];
@@ -495,7 +496,7 @@ const seedGroups = [
       "Gabriela Rocha - Medley Nada Além de Ti",
       "Gabriela Rocha - Medley Poderoso Deus",
       "Gabriela Rocha - Medley Senhor Formoso És",
-      "Gabriela Rocha - Medley TGS",
+      "Gabriela Rocha - Medley Tofreu Gerando Salvação",
       "Gabriela Rocha - Pra Onde Iremos",
       "Gabriela Rocha - Teu Santo Nome",
       "Gabriela Rocha - Teu Santo Nome 2.0",
@@ -518,7 +519,7 @@ const seedGroups = [
       "IBAB - Me Derramar",
       "IBAB - Medley Tributo Yeovah",
       "Igor Zolla - Atrai O Meu Coração",
-      "Ihonas Serra - Furioso Oceano",
+      "Thomas Serra - Furioso Oceano",
       "Ipalpha - Ao Pé da Cruz",
       "Ipalpha - És o Rei Que Vem",
       "Ipalpha - Vinho e Pão",
@@ -2247,6 +2248,71 @@ function buildSeedBackedCatalog(catalog) {
   return sortCatalogSongs([...mergedSeedSongs, ...extraSongs]);
 }
 
+function renameSpecificSeedSong(song, previousArtist, previousTitle, nextArtist, nextTitle) {
+  if (!song) {
+    return song;
+  }
+
+  const normalizedProducer = cleanText(song.producer);
+  const normalizedArtist = cleanText(song.artist);
+  const normalizedTitle = cleanText(song.title);
+  const previousKey = buildSongCatalogKey({
+    producer: "elite",
+    artist: previousArtist,
+    title: previousTitle
+  });
+  const previousId = `seed-${previousKey}`;
+  const currentKey = buildSongCatalogKey(song);
+  const currentId = cleanText(song.id);
+  const shouldRename = normalizedProducer === "elite" && (
+    currentId === previousId
+    || currentKey === previousKey
+    || (normalizedArtist === previousArtist && normalizedTitle === previousTitle)
+  );
+
+  if (!shouldRename) {
+    return song;
+  }
+
+  const nextKey = buildSongCatalogKey({
+    producer: "elite",
+    artist: nextArtist,
+    title: nextTitle
+  });
+
+  return createSongRecord({
+    ...song,
+    id: `seed-${nextKey}`,
+    producer: "elite",
+    artist: nextArtist,
+    title: nextTitle
+  });
+}
+
+function applyEliteSongRenameMigration(catalog) {
+  const normalizedCatalog = normalizeStoredCatalog(catalog);
+
+  return dedupeCatalogSongs(normalizedCatalog.map((song) => {
+    let nextSong = renameSpecificSeedSong(
+      song,
+      "Gabriela Rocha",
+      "Medley TGS",
+      "Gabriela Rocha",
+      "Medley Tofreu Gerando Salvação"
+    );
+
+    nextSong = renameSpecificSeedSong(
+      nextSong,
+      "Ihonas Serra",
+      "Furioso Oceano",
+      "Thomas Serra",
+      "Furioso Oceano"
+    );
+
+    return nextSong;
+  }));
+}
+
 function applyCatalogMigrations(catalog, storageKey = "") {
   let nextCatalog = normalizeStoredCatalog(catalog);
   let changed = false;
@@ -2261,6 +2327,12 @@ function applyCatalogMigrations(catalog, storageKey = "") {
   if (!appliedMigrations.has(CATALOG_MIGRATIONS.replaceEliteMarch2026)) {
     nextCatalog = replaceProducerCatalogWithSeed(nextCatalog, "elite");
     appliedMigrations.add(CATALOG_MIGRATIONS.replaceEliteMarch2026);
+    changed = true;
+  }
+
+  if (!appliedMigrations.has(CATALOG_MIGRATIONS.renameEliteSongsApril2026)) {
+    nextCatalog = applyEliteSongRenameMigration(nextCatalog);
+    appliedMigrations.add(CATALOG_MIGRATIONS.renameEliteSongsApril2026);
     changed = true;
   }
 
