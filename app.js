@@ -1277,11 +1277,42 @@ function renderArtworkMarkup(songLike, variant = "card", options = {}) {
   const shouldEagerLoad = Boolean(options.eager) || variant === "viewer" || variant === "recent";
   const fetchPriority = shouldEagerLoad ? "high" : "low";
   const loadingMode = shouldEagerLoad ? "eager" : "lazy";
+  const localThumbUrl = variant === "viewer" ? resolveLocalSongCoverThumbUrl(songLike) : "";
+  const fullCoverUrl = variant === "viewer" ? resolveSongCoverUrl(songLike) : coverUrl;
 
   if (!coverUrl) {
     return `
       <div class="cover-shell cover-${variant} is-placeholder" aria-hidden="true">
         <span>${escapeHtml(monogram)}</span>
+      </div>
+    `;
+  }
+
+  if (variant === "viewer" && localThumbUrl && fullCoverUrl && localThumbUrl !== fullCoverUrl) {
+    return `
+      <div class="cover-shell cover-${variant} is-progressive" data-progressive-cover="true">
+        <img
+          class="cover-progressive-thumb"
+          src="${escapeHtml(localThumbUrl)}"
+          alt="Capa de ${escapeHtml(title)}"
+          loading="eager"
+          decoding="async"
+          fetchpriority="high"
+          width="512"
+          height="512"
+          data-fallback-text="${escapeHtml(monogram)}"
+        >
+        <img
+          class="cover-progressive-full"
+          src="${escapeHtml(fullCoverUrl)}"
+          alt="Capa de ${escapeHtml(title)}"
+          loading="eager"
+          decoding="async"
+          fetchpriority="high"
+          width="1024"
+          height="1024"
+          data-progressive-full="true"
+        >
       </div>
     `;
   }
@@ -1300,6 +1331,41 @@ function renderArtworkMarkup(songLike, variant = "card", options = {}) {
       >
     </div>
   `;
+}
+
+function hydrateProgressiveArtwork(root = document) {
+  if (!root || typeof root.querySelectorAll !== "function") {
+    return;
+  }
+
+  const progressiveCovers = root.querySelectorAll("[data-progressive-cover='true']");
+
+  progressiveCovers.forEach((coverElement) => {
+    const fullImage = coverElement.querySelector("[data-progressive-full='true']");
+
+    if (!(fullImage instanceof HTMLImageElement)) {
+      return;
+    }
+
+    if (fullImage.complete && fullImage.naturalWidth > 0) {
+      coverElement.classList.add("is-full-ready");
+      return;
+    }
+
+    const handleLoad = () => {
+      coverElement.classList.add("is-full-ready");
+      fullImage.removeEventListener("load", handleLoad);
+      fullImage.removeEventListener("error", handleError);
+    };
+
+    const handleError = () => {
+      fullImage.removeEventListener("load", handleLoad);
+      fullImage.removeEventListener("error", handleError);
+    };
+
+    fullImage.addEventListener("load", handleLoad, { once: true });
+    fullImage.addEventListener("error", handleError, { once: true });
+  });
 }
 
 function mapCloudSongToRecord(row = {}) {
@@ -7264,6 +7330,8 @@ function renderSongViewer() {
       </div>
     </div>
   `;
+
+  hydrateProgressiveArtwork(lyricsViewer);
 
   lyricsModal.classList.remove("is-hidden");
   lyricsModal.setAttribute("aria-hidden", "false");

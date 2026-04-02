@@ -951,6 +951,40 @@ a {
   object-fit: cover;
 }
 
+.cover-shell.is-progressive img {
+  position: absolute;
+  inset: 0;
+}
+
+.cover-progressive-thumb,
+.cover-progressive-full {
+  transition:
+    opacity 320ms ease,
+    transform 420ms ease,
+    filter 320ms ease;
+}
+
+.cover-progressive-thumb {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.cover-progressive-full {
+  opacity: 0;
+  transform: scale(1.018);
+}
+
+.cover-shell.is-progressive.is-full-ready .cover-progressive-thumb {
+  opacity: 0;
+  transform: scale(1.01);
+  filter: blur(1px);
+}
+
+.cover-shell.is-progressive.is-full-ready .cover-progressive-full {
+  opacity: 1;
+  transform: scale(1);
+}
+
 .cover-shell.is-placeholder {
   display: grid;
   place-items: center;
