@@ -1,4 +1,4 @@
-const CACHE_NAME = "adoradores-cristo-pwa-v86";
+const CACHE_NAME = "adoradores-cristo-pwa-v87";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -6,6 +6,7 @@ const APP_SHELL = [
   "./app.js",
   "./google-sheets-config.js",
   "./covers/manifest.json",
+  "./covers/thumbs/manifest.json",
   "./manifest.webmanifest",
   "./icons/icon.svg",
   "./icons/icon-192.png",

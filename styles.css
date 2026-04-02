@@ -814,6 +814,8 @@ a {
   overflow: hidden;
   padding: 0;
   aspect-ratio: 0.74;
+  content-visibility: auto;
+  contain-intrinsic-size: 260px 352px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02));
 }
 

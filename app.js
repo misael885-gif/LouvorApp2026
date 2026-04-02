@@ -37,6 +37,8 @@ const COVER_ASSET_DB = {
   version: 1
 };
 const LOCAL_COVER_MANIFEST_PATH = "./covers/manifest.json";
+const LOCAL_COVER_THUMB_MANIFEST_PATH = "./covers/thumbs/manifest.json";
+const EAGER_CARD_COVER_COUNT = 12;
 
 const PRODUCERS = {
   elite: {
@@ -981,6 +983,7 @@ const state = {
   weeklySelectionWeekKey: "",
   coverAssets: new Map(),
   localCoverMap: new Map(),
+  localCoverThumbMap: new Map(),
   disabledLocalCoverKeys: new Set(),
   selectedSongId: null,
   lyricsMinistryMode: false,
@@ -1266,11 +1269,14 @@ function resolveSongCoverUrl(songLike) {
   return cleanText(state.coverAssets.get(coverAssetId));
 }
 
-function renderArtworkMarkup(songLike, variant = "card") {
-  const coverUrl = resolveSongCoverUrl(songLike);
+function renderArtworkMarkup(songLike, variant = "card", options = {}) {
+  const coverUrl = resolveArtworkCoverUrl(songLike, variant);
   const title = cleanText(songLike?.title) || "Musica";
   const artist = cleanText(songLike?.artist) || "Ministerio";
   const monogram = buildArtworkMonogram(title, artist);
+  const shouldEagerLoad = Boolean(options.eager) || variant === "viewer" || variant === "recent";
+  const fetchPriority = shouldEagerLoad ? "high" : "low";
+  const loadingMode = shouldEagerLoad ? "eager" : "lazy";
 
   if (!coverUrl) {
     return `
@@ -1285,7 +1291,11 @@ function renderArtworkMarkup(songLike, variant = "card") {
       <img
         src="${escapeHtml(coverUrl)}"
         alt="Capa de ${escapeHtml(title)}"
-        loading="lazy"
+        loading="${loadingMode}"
+        decoding="async"
+        fetchpriority="${fetchPriority}"
+        width="512"
+        height="512"
         data-fallback-text="${escapeHtml(monogram)}"
       >
     </div>
@@ -1451,48 +1461,92 @@ function resolveLocalSongCoverUrl(songLike) {
   return "";
 }
 
+function resolveLocalSongCoverThumbUrl(songLike) {
+  if (!(state.localCoverThumbMap instanceof Map) || !state.localCoverThumbMap.size) {
+    return "";
+  }
+
+  if (isLocalCoverDisabled(songLike)) {
+    return "";
+  }
+
+  const songId = cleanText(songLike?.id);
+  if (songId && state.localCoverThumbMap.has(songId)) {
+    return cleanText(state.localCoverThumbMap.get(songId));
+  }
+
+  const songKey = buildSongCatalogKey(songLike);
+  if (songKey && state.localCoverThumbMap.has(songKey)) {
+    return cleanText(state.localCoverThumbMap.get(songKey));
+  }
+
+  return "";
+}
+
+function resolveArtworkCoverUrl(songLike, variant = "card") {
+  if (variant === "card" || variant === "recent" || variant === "admin-list") {
+    return resolveLocalSongCoverThumbUrl(songLike) || resolveSongCoverUrl(songLike);
+  }
+
+  return resolveSongCoverUrl(songLike);
+}
+
+function parseLocalCoverManifestEntries(manifest) {
+  return manifest && typeof manifest === "object" && !Array.isArray(manifest)
+    ? Object.entries(manifest.covers && typeof manifest.covers === "object" ? manifest.covers : manifest)
+    : [];
+}
+
+async function fetchLocalCoverManifestMap(manifestPath, versionTag) {
+  const response = await fetch(`${manifestPath}?v=${versionTag}`, {
+    method: "GET"
+  });
+
+  if (!response.ok) {
+    throw new Error(`Manifesto indisponivel: ${manifestPath}`);
+  }
+
+  const manifest = await response.json();
+  const manifestEntries = parseLocalCoverManifestEntries(manifest);
+  const nextCoverMap = new Map();
+
+  for (const [rawKey, rawValue] of manifestEntries) {
+    const normalizedKey = cleanText(rawKey);
+    const normalizedValue = normalizeLocalCoverPath(
+      typeof rawValue === "string"
+        ? rawValue
+        : rawValue?.path || rawValue?.src || rawValue?.url
+    );
+
+    if (!normalizedKey || !normalizedValue) {
+      continue;
+    }
+
+    nextCoverMap.set(normalizedKey, normalizedValue);
+  }
+
+  return nextCoverMap;
+}
+
 async function loadLocalCoverManifest() {
   if (typeof window.fetch !== "function") {
     state.localCoverMap = new Map();
+    state.localCoverThumbMap = new Map();
     return;
   }
 
   try {
-    const response = await fetch(`${LOCAL_COVER_MANIFEST_PATH}?v=20260401-local-covers-1`, {
-      method: "GET",
-      cache: "no-store"
-    });
-
-    if (!response.ok) {
-      state.localCoverMap = new Map();
-      return;
-    }
-
-    const manifest = await response.json();
-    const manifestEntries = manifest && typeof manifest === "object" && !Array.isArray(manifest)
-      ? Object.entries(manifest.covers && typeof manifest.covers === "object" ? manifest.covers : manifest)
-      : [];
-    const nextCoverMap = new Map();
-
-    for (const [rawKey, rawValue] of manifestEntries) {
-      const normalizedKey = cleanText(rawKey);
-      const normalizedValue = normalizeLocalCoverPath(
-        typeof rawValue === "string"
-          ? rawValue
-          : rawValue?.path
-      );
-
-      if (!normalizedKey || !normalizedValue) {
-        continue;
-      }
-
-      nextCoverMap.set(normalizedKey, normalizedValue);
-    }
+    const [nextCoverMap, nextCoverThumbMap] = await Promise.all([
+      fetchLocalCoverManifestMap(LOCAL_COVER_MANIFEST_PATH, "20260402-local-covers-2"),
+      fetchLocalCoverManifestMap(LOCAL_COVER_THUMB_MANIFEST_PATH, "20260402-cover-thumbs-1").catch(() => new Map())
+    ]);
 
     state.localCoverMap = nextCoverMap;
+    state.localCoverThumbMap = nextCoverThumbMap;
   } catch (error) {
     console.warn("Nao consegui carregar o manifesto local de capas.", error);
     state.localCoverMap = new Map();
+    state.localCoverThumbMap = new Map();
   }
 }
 
@@ -5968,7 +6022,7 @@ function renderSongsPanel(visibleSongs) {
   const producer = PRODUCERS[state.activeProducer];
 
   elements.songList.innerHTML = songsToRender
-    .map((song) => {
+    .map((song, index) => {
       const isActive = state.selectedSongId === song.id;
       const favoriteLabel = isFavorite(song.id) ? '<span class="song-favorite-badge">Favorita</span>' : "";
       const showPosterCopy = !resolveSongCoverUrl(song);
@@ -5984,7 +6038,7 @@ function renderSongsPanel(visibleSongs) {
           style="--card-accent: ${producer.softAccent}; --card-border: ${producer.accent}; --card-shadow: ${producer.shadow};"
         >
           <div class="song-poster-media">
-            ${renderArtworkMarkup(song, "card")}
+            ${renderArtworkMarkup(song, "card", { eager: index < EAGER_CARD_COVER_COUNT })}
           </div>
 
           <div class="song-poster-overlay">
