@@ -360,7 +360,7 @@ window.MINISTERIO_SEED_GROUPS = [
       "Ministério Trazendo a Arca - Te Louvarei",
       "Ministério Trazendo a Arca - Trazendo a Arca",
       "Ministério Zoe - Aquieta Minh'Alma",
-      "Minist. Toque No Altar - Eu Vou Viver Uma Virada",
+      "Ministério Toque No Altar - Eu Vou Viver Uma Virada",
       "Morada - Emaús",
       "Morada - É Tudo Sobre Você",
       "Morada - Medley Em Espírito",
